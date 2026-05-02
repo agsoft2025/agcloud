@@ -1,4 +1,4 @@
-import { Room, connect } from "@livekit/client";
+import { Room, connect } from "livekit-client";
 
 let room: Room | null = null;
 const defaultUrl = import.meta.env.VITE_LIVEKIT_URL ?? "ws://localhost/rtc";
