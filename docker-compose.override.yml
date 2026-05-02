@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  caddy:
+    image: caddy:latest
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - backend
+      - livekit
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  livekit:
+    ports:
+      - "7881:7881/udp"
+      - "50000-60000:50000-60000/udp"
+    environment:
+      - LIVEKIT_UDP_PORT_RANGE=50000-60000
+
+  frontend:
+    environment:
+      - VITE_API_BASE_URL=http://localhost
+      - VITE_LIVEKIT_URL=ws://localhost/rtc
+
+volumes:
+  caddy_data:
+  caddy_config:
