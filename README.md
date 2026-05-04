@@ -34,6 +34,7 @@ agcloud is an open communications platform similar in scope to ZEGOCLOUD or Twil
 
 This repository contains a complete set of design specifications. Read them in this order:
 
+
 | # | Document | Purpose |
 |---|----------|---------|
 | 1 | [context-info.md](./context-info.md) | Original product brief and roadmap |
