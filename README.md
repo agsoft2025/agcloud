@@ -118,22 +118,152 @@ See [Design-Diagrams.md](./Design-Diagrams.md) for detailed architecture diagram
 
 ```
 agcloud/
-  README.md                       # This file
-  context-info.md                 # Product brief
-  Feasibility-Research.md         # Tech feasibility analysis
-  LiveKit-Internals.md            # LiveKit deep-dive
-  Design-Diagrams.md              # Architecture diagrams
-  Backend-Specification.md        # Backend service spec
-  Frontend-Specification.md       # Web app spec
-
-  (planned)
-  backend/                        # Node.js + Fastify service
-  frontend/                       # SvelteKit web app
-  infrastructure/
-    docker-compose.yml            # Local dev stack
-    livekit/                      # LiveKit config
-    helm/                         # Kubernetes charts (Phase 2)
-  scripts/                        # Dev tooling
+├── backend/                              ← Node.js + Fastify service (Docker container)
+│   ├── src/
+│   │   ├── config/
+│   │   │   ├── index.ts                  ← env validation, exports typed config object
+│   │   │   └── constants.ts              ← app-wide constants (timeouts, limits, etc.)
+│   │   ├── modules/                      ← one folder per business domain
+│   │   │   ├── auth/
+│   │   │   │   ├── auth.routes.ts
+│   │   │   │   ├── auth.service.ts
+│   │   │   │   ├── auth.repository.ts
+│   │   │   │   ├── auth.schemas.ts       ← Zod schemas
+│   │   │   │   └── auth.types.ts
+│   │   │   ├── user/
+│   │   │   │   ├── user.routes.ts
+│   │   │   │   ├── user.service.ts
+│   │   │   │   ├── user.repository.ts
+│   │   │   │   └── user.schemas.ts
+│   │   │   ├── call/
+│   │   │   │   ├── call.routes.ts
+│   │   │   │   ├── call.service.ts
+│   │   │   │   ├── call.repository.ts
+│   │   │   │   ├── call.state-machine.ts ← Redis-backed state transitions
+│   │   │   │   └── call.schemas.ts
+│   │   │   ├── livekit/
+│   │   │   │   ├── livekit.routes.ts     ← POST /livekit/webhook
+│   │   │   │   ├── livekit.service.ts    ← SDK wrapper (rooms, tokens, egress)
+│   │   │   │   └── livekit.types.ts
+│   │   │   ├── notification/
+│   │   │   │   ├── notification.service.ts
+│   │   │   │   ├── fcm.client.ts
+│   │   │   │   └── apns.client.ts        ← VoIP push for iOS
+│   │   │   └── health/
+│   │   │       └── health.routes.ts      ← /health/live, /health/ready, /metrics
+│   │   ├── shared/                       ← cross-cutting concerns, no business logic
+│   │   │   ├── middleware/
+│   │   │   │   ├── auth.middleware.ts
+│   │   │   │   ├── rate-limit.middleware.ts
+│   │   │   │   ├── error-handler.ts      ← RFC 7807 error responses
+│   │   │   │   └── request-id.ts
+│   │   │   ├── db/
+│   │   │   │   ├── mongo.client.ts
+│   │   │   │   └── redis.client.ts
+│   │   │   ├── observability/
+│   │   │   │   ├── logger.ts             ← Pino (structured, PII-redacted)
+│   │   │   │   ├── metrics.ts            ← prom-client RED + business metrics
+│   │   │   │   └── tracing.ts            ← OpenTelemetry (OTLP exporter)
+│   │   │   ├── security/
+│   │   │   │   ├── jwt.ts
+│   │   │   │   ├── argon2.ts
+│   │   │   │   └── crypto.ts
+│   │   │   └── utils/
+│   │   │       ├── retry.ts              ← p-retry wrapper
+│   │   │       ├── circuit-breaker.ts    ← opossum wrapper
+│   │   │       └── idempotency.ts        ← Redis-backed dedup
+│   │   ├── app.ts                        ← Fastify instance, plugin registration
+│   │   └── server.ts                     ← entrypoint, graceful shutdown
+│   ├── test/
+│   │   ├── unit/
+│   │   ├── integration/
+│   │   └── e2e/
+│   ├── Dockerfile
+│   ├── .env.example
+│   ├── tsconfig.json
+│   ├── package.json
+│   └── vitest.config.ts
+│
+├── frontend/                             ← SvelteKit PWA (Docker container)
+│   ├── src/
+│   │   ├── app.html
+│   │   ├── app.css
+│   │   ├── service-worker.ts
+│   │   ├── hooks.client.ts
+│   │   ├── hooks.server.ts
+│   │   ├── lib/
+│   │   │   ├── api/
+│   │   │   │   ├── client.ts             ← fetch wrapper: token attach, auto-refresh
+│   │   │   │   ├── auth.api.ts
+│   │   │   │   ├── user.api.ts
+│   │   │   │   └── call.api.ts
+│   │   │   ├── livekit/
+│   │   │   │   ├── LiveKitClient.ts      ← connect/disconnect, publish tracks
+│   │   │   │   ├── useCall.ts            ← Svelte action: bind call state to UI
+│   │   │   │   └── audio-output.ts
+│   │   │   ├── stores/
+│   │   │   │   ├── auth.store.ts
+│   │   │   │   ├── call.store.ts
+│   │   │   │   ├── user.store.ts
+│   │   │   │   ├── presence.store.ts
+│   │   │   │   └── toast.store.ts
+│   │   │   ├── components/
+│   │   │   │   ├── atoms/                ← Button, Input, Avatar, Badge, Spinner, Skeleton
+│   │   │   │   ├── molecules/            ← Modal, Toast, DropdownMenu, Tooltip
+│   │   │   │   └── call/                 ← VideoTile, CallControls, IncomingCallOverlay,
+│   │   │   │                               ParticipantList, NetworkIndicator
+│   │   │   └── utils/
+│   │   │       ├── time.ts
+│   │   │       ├── format.ts
+│   │   │       ├── a11y.ts
+│   │   │       └── web-vitals.ts
+│   │   └── routes/
+│   │       ├── +layout.svelte
+│   │       ├── +layout.ts
+│   │       ├── +page.svelte              ← / → redirect to /home or /signin
+│   │       ├── signin/
+│   │       ├── signup/
+│   │       ├── forgot-password/
+│   │       ├── reset-password/
+│   │       ├── home/
+│   │       ├── contacts/[id]/
+│   │       ├── calls/[id]/
+│   │       ├── call/[roomName]/          ← full-screen active call
+│   │       └── settings/                 ← profile, devices, notifications, privacy
+│   ├── static/
+│   │   ├── icons/
+│   │   └── manifest.webmanifest
+│   ├── Dockerfile
+│   ├── .env.example
+│   ├── svelte.config.js
+│   ├── vite.config.ts
+│   ├── tsconfig.json
+│   ├── package.json
+│   └── playwright.config.ts
+│
+├── infrastructure/
+│   ├── livekit/
+│   │   └── livekit.yaml                  ← LiveKit server config
+│   ├── helm/                             ← Kubernetes Helm charts (Phase 2)
+│   │   ├── backend/
+│   │   ├── frontend/
+│   │   ├── livekit/                      ← DaemonSet + hostNetwork for UDP media
+│   │   └── proxy/
+│   └── README.md
+│
+├── documents/                            ← design specs (read-only reference)
+│   ├── context-info.md
+│   ├── Feasibility-Research.md
+│   ├── LiveKit-Internals.md
+│   ├── Design-Diagrams.md
+│   ├── Backend-Specification.md
+│   └── Frontend-Specification.md
+│
+├── docker-compose.yml                    ← MVP: mongo, redis, livekit, backend, frontend
+├── docker-compose.override.yml           ← local TLS testing via Caddy
+├── Caddyfile                             ← /api → backend, /rtc → livekit
+├── .env.example
+└── README.md
 ```
 
 ---
@@ -190,23 +320,34 @@ agcloud/
 git clone https://github.com/<your-org>/agcloud.git
 cd agcloud
 
-# Start the local stack (LiveKit, MongoDB, Redis)
-docker-compose up -d
+# Start all containers (mongo, redis, livekit, backend, frontend)
+docker-compose up --build
 
-# Install backend dependencies and start
+# Verify backend is healthy
+curl http://localhost:3000/health/live    # → 200 OK
+curl http://localhost:3000/health/ready  # → 200 OK (MongoDB + Redis + LiveKit reachable)
+
+# Frontend is served at
+open http://localhost:4173
+```
+
+For development outside Docker:
+
+```bash
+# Start infrastructure only
+docker-compose up -d mongo redis livekit
+
+# Backend
 cd backend
 pnpm install
-cp .env.example .env
-pnpm dev
+cp .env.example .env   # fill in MONGO_URI, REDIS_URL, LIVEKIT_* , JWT_SECRET
+pnpm dev               # http://localhost:3000
 
-# Install frontend dependencies and start (in a new terminal)
-cd ../frontend
+# Frontend (new terminal)
+cd frontend
 pnpm install
-cp .env.example .env
-pnpm dev
-
-# Open the app
-open http://localhost:5173
+cp .env.example .env   # fill in VITE_API_BASE_URL, VITE_LIVEKIT_URL
+pnpm dev               # http://localhost:5173
 ```
 
 ### Environment Variables
