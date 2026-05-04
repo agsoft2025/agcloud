@@ -17,7 +17,7 @@ services:
       - "6379:6379"
 
   livekit:
-    image: livekit/livekit:latest
+    image: livekit/livekit-server
     restart: unless-stopped
     environment:
       - LIVEKIT_REDIS_URL=redis://redis:6379
