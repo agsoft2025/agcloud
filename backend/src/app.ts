@@ -1,17 +1,23 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
-import authRoutes from "./routes/auth.js";
-import callRoutes from "./routes/calls.js";
-import healthRoutes from "./routes/health.js";
-import config from "./config.js";
+import authRoutes from "./modules/auth/auth.routes.js";
+import callRoutes from "./modules/call/call.routes.js";
+import healthRoutes from "./modules/health/health.routes.js";
+import config from "./config/index.js";
 
-const app = Fastify({ logger: true });
+export async function buildApp() {
+	const app = Fastify({ logger: true });
 
-await app.register(cors, { origin: true });
-await app.register(healthRoutes);
-await app.register(authRoutes, { prefix: "/api/auth" });
-await app.register(callRoutes, { prefix: "/api/calls" });
 
-app.decorate("config", config);
+	// Register Plugins
+	await app.register(cors, { origin: true });
 
-export default app;
+	// Register Routes
+	await app.register(healthRoutes);
+	await app.register(authRoutes, { prefix: "/api/auth" });
+	await app.register(callRoutes, { prefix: "/api/calls" });
+
+	app.decorate("config", config);
+
+	return app;
+}
