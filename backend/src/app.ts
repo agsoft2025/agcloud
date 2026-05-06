@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import cookie from "@fastify/cookie";
 import authRoutes from "./modules/auth/auth.routes.js";
 import callRoutes from "./modules/call/call.routes.js";
 import healthRoutes from "./modules/health/health.routes.js";
@@ -11,6 +12,10 @@ export async function buildApp() {
 
 	// Register Plugins
 	await app.register(cors, { origin: true });
+	await app.register(cookie, {
+		secret: config.jwtSecret, // Using jwtSecret to sign cookies
+		parseOptions: {} 
+	});
 
 	// Register Routes
 	await app.register(healthRoutes);
