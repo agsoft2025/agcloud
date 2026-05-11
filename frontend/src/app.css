@@ -1,0 +1,74 @@
+@import "open-props/style";
+@import "@picocss/pico/css/pico.min.css";
+
+:root {
+  color-scheme: light;
+
+  --ag-font-sans: "Aptos", "Segoe UI", system-ui, sans-serif;
+  --ag-font-mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+
+  --ag-color-brand: var(--teal-7);
+  --ag-color-brand-hover: var(--teal-8);
+  --ag-color-brand-active: var(--teal-9);
+  --ag-color-accent: var(--cyan-6);
+  --ag-color-surface: var(--gray-0);
+  --ag-color-surface-raised: white;
+  --ag-color-border: var(--gray-3);
+  --ag-color-text: var(--gray-10);
+  --ag-color-text-muted: var(--gray-7);
+  --ag-color-danger: var(--red-7);
+
+  --ag-radius-sm: var(--radius-2);
+  --ag-radius-md: var(--radius-3);
+  --ag-radius-lg: var(--radius-4);
+
+  --ag-space-xs: var(--size-2);
+  --ag-space-sm: var(--size-3);
+  --ag-space-md: var(--size-5);
+  --ag-space-lg: var(--size-7);
+  --ag-space-xl: var(--size-9);
+
+  --ag-shadow-sm: var(--shadow-2);
+  --ag-shadow-md: var(--shadow-3);
+
+  --pico-font-family: var(--ag-font-sans);
+  --pico-primary: var(--ag-color-brand);
+  --pico-primary-hover: var(--ag-color-brand-hover);
+  --pico-primary-focus: color-mix(in srgb, var(--ag-color-brand) 28%, transparent);
+  --pico-primary-inverse: white;
+  --pico-border-radius: var(--ag-radius-sm);
+  --pico-form-element-spacing-vertical: 0.75rem;
+  --pico-form-element-spacing-horizontal: 0.875rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --ag-color-brand: var(--teal-4);
+    --ag-color-brand-hover: var(--teal-3);
+    --ag-color-brand-active: var(--teal-2);
+    --ag-color-accent: var(--cyan-4);
+    --ag-color-surface: var(--gray-11);
+    --ag-color-surface-raised: var(--gray-10);
+    --ag-color-border: var(--gray-8);
+    --ag-color-text: var(--gray-1);
+    --ag-color-text-muted: var(--gray-4);
+    --ag-color-danger: var(--red-4);
+  }
+}
+
+html {
+  background: var(--ag-color-surface);
+}
+
+body {
+  min-width: 320px;
+  color: var(--ag-color-text);
+  background: var(--ag-color-surface);
+}
+
+pre,
+code {
+  font-family: var(--ag-font-mono);
+}

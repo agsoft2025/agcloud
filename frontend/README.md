@@ -1,6 +1,6 @@
 # agcloud Frontend
 
-This frontend is the user-facing web application for `agcloud`, built as a SvelteKit app.
+This frontend is the user-facing web application for `agcloud`, built as a Vite + React app with strict TypeScript.
 
 ## Purpose
 - User authentication and session management
@@ -16,14 +16,19 @@ This frontend is the user-facing web application for `agcloud`, built as a Svelt
 - `src/lib/stores/` — application state management
 - `src/assets/` — icons, styles, images
 
+## Aliases
+- `$lib` -> `src/lib`
+- `$routes` -> `src/routes`
+- `$components` -> `src/lib/components`
+
 ## LiveKit integration
 - The frontend receives a LiveKit access token from the backend
 - It connects to LiveKit via the standard SDK and joins a room
 - All actual media transport, ICE, TURN, and SFU behavior is handled by LiveKit
 
 ## Local development
-1. Install dependencies: `pnpm install`
-2. Run the development server: `pnpm dev`
+1. Install dependencies: `npm install`
+2. Run the development server: `npm run dev`
 
 ## Notes
 - Use a proxy or CORS configuration so frontend calls to `/api/*` reach the backend during local dev

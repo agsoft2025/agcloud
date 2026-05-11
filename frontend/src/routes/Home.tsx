@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { callApi } from '../lib/services/api';
-import { connectToLiveKit } from '../lib/services/livekit';
-import CallPanel from '../lib/components/CallPanel';
+import CallPanel from '$components/CallPanel';
+import { callApi } from '$lib/services/api';
+import { connectToLiveKit } from '$lib/services/livekit';
 
 const Home: React.FC = () => {
   const [email, setEmail] = useState('');

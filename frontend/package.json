@@ -5,18 +5,30 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "build": "vite build && npm run build:sw",
+    "build:sw": "tsc src/service-worker.ts --target ES2020 --lib ES2020,WebWorker --module ESNext --outDir dist --skipLibCheck",
+    "preview": "vite preview",
+    "test:unit": "vitest run --root ./src --environment jsdom --globals",
+    "test:unit:watch": "vitest --root ./src --environment jsdom --globals",
+    "test:e2e": "npm run build && playwright test --config=playwright.config.mjs"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^25.6.0",
     "@types/react": "^18.0.0",
     "@types/react-dom": "^18.0.0",
     "@vitejs/plugin-react": "^4.0.0",
+    "jsdom": "^29.1.1",
     "typescript": "^5.5.4",
-    "vite": "^5.4.0"
+    "vite": "^5.4.0",
+    "vitest": "^4.1.5"
   },
   "dependencies": {
+    "@picocss/pico": "^2.1.1",
     "livekit-client": "^2.18.8",
+    "open-props": "^1.7.23",
     "react": "^18.0.0",
     "react-dom": "^18.0.0",
     "react-router-dom": "^6.0.0"
