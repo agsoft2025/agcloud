@@ -17,6 +17,7 @@ describe("Auth Routes", () => {
   beforeAll(async () => {
     // Suppress logs during tests
     process.env.NODE_ENV = "test";
+    process.env.JWT_SECRET = "a_very_long_and_secure_secret_for_tests_32_chars_plus";
     app = await buildApp();
     db = await connectMongo();
   });

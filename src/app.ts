@@ -11,7 +11,10 @@ export async function buildApp() {
 
 
 	// Register Plugins
-	await app.register(cors, { origin: true });
+	await app.register(cors, { 
+		origin: config.env === "production" ? config.frontendUrl : true,
+		credentials: true
+	});
 	await app.register(cookie, {
 		secret: config.jwtSecret, // Using jwtSecret to sign cookies
 		parseOptions: {} 

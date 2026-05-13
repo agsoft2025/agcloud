@@ -11,7 +11,8 @@ const envSchema = z.object({
   LIVEKIT_API_KEY: z.string().default(""),
   LIVEKIT_API_SECRET: z.string().default(""),
   LIVEKIT_URL: z.string().default("http://localhost:7880"),
-  JWT_SECRET: z.string().default("change-me")
+  JWT_SECRET: z.string().min(32),
+  FRONTEND_URL: z.string().default("http://localhost:5173").transform(val => val.split(",").map(s => s.trim()))
 });
 
 const envVars = envSchema.parse(process.env);
@@ -24,7 +25,8 @@ const config = {
   livekitApiKey: envVars.LIVEKIT_API_KEY,
   livekitApiSecret: envVars.LIVEKIT_API_SECRET,
   livekitUrl: envVars.LIVEKIT_URL,
-  jwtSecret: envVars.JWT_SECRET
+  jwtSecret: envVars.JWT_SECRET,
+  frontendUrl: envVars.FRONTEND_URL
 };
 
 export default config;

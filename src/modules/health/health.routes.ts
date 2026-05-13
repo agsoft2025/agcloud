@@ -1,9 +1,35 @@
 import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import config from "../../config/index.js";
+import { connectMongo } from "../../shared/db/mongo.client.js";
+import { getRedisClient } from "../../shared/db/redis.client.js";
+import { checkLiveKitHealth } from "../livekit/livekit.service.js";
 
 const healthRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   // Production-grade Dashboard at the Root
   app.get("/", async (request, reply) => {
+    let mongoStatus = "offline";
+    let redisStatus = "offline";
+    let livekitStatus = "offline";
+
+    try {
+      const db = await connectMongo();
+      const ping = await db.command({ ping: 1 });
+      if (ping.ok) mongoStatus = "online";
+    } catch (e) { }
+
+    try {
+      const redis = getRedisClient();
+      const ping = await redis.ping();
+      if (ping === "PONG") redisStatus = "online";
+    } catch (e) { }
+
+    try {
+      const isLiveKitUp = await checkLiveKitHealth();
+      if (isLiveKitUp) livekitStatus = "online";
+    } catch (e) { }
+
+    const isAllUp = mongoStatus === "online" && redisStatus === "online" && livekitStatus === "online";
+
     reply.type("text/html").send(`
       <!DOCTYPE html>
       <html lang="en">
@@ -20,6 +46,7 @@ const healthRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
                   --text-main: #f8fafc;
                   --text-muted: #94a3b8;
                   --success: #10b981;
+                  --error: #ef4444;
                   --border: #334155;
               }
               body {
@@ -54,9 +81,9 @@ const healthRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
               .status-dot {
                   width: 16px;
                   height: 16px;
-                  background-color: var(--success);
+                  background-color: ${isAllUp ? 'var(--success)' : 'var(--error)'};
                   border-radius: 50%;
-                  box-shadow: 0 0 12px var(--success);
+                  box-shadow: 0 0 12px ${isAllUp ? 'var(--success)' : 'var(--error)'};
                   animation: pulse 2s infinite;
               }
               h1 {
@@ -66,7 +93,7 @@ const healthRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
                   letter-spacing: -0.025em;
               }
               @keyframes pulse {
-                  0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+                  0% { box-shadow: 0 0 0 0 ${isAllUp ? 'rgba(16, 185, 129, 0.7)' : 'rgba(239, 68, 68, 0.7)'}; }
                   70% { box-shadow: 0 0 0 10px rgba(16, 185, 129, 0); }
                   100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
               }
@@ -93,6 +120,15 @@ const healthRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
                   font-weight: 500;
                   font-family: monospace;
               }
+              .status-badge {
+                font-size: 0.75rem;
+                padding: 2px 8px;
+                border-radius: 99px;
+                font-weight: 600;
+                text-transform: uppercase;
+              }
+              .status-online { background: rgba(16, 185, 129, 0.2); color: var(--success); }
+              .status-offline { background: rgba(239, 68, 68, 0.2); color: var(--error); }
               .footer {
                   margin-top: 2.5rem;
                   text-align: center;
@@ -105,27 +141,33 @@ const healthRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
           <div class="dashboard">
               <div class="header">
                   <div class="status-dot"></div>
-                  <h1>agcloud API is Online</h1>
+                  <h1>agcloud API is ${isAllUp ? 'Online' : 'Degraded'}</h1>
               </div>
               <p style="color: var(--text-muted); margin-bottom: 2rem; line-height: 1.6;">
-                  The backend service is successfully running and accepting connections.
+                  The backend service is running. Readiness check: <b>${isAllUp ? 'PASSED' : 'FAILED'}</b>.
               </p>
               <div class="info-grid">
                   <div class="info-item">
+                      <div class="info-label">MongoDB</div>
+                      <div class="info-value">
+                        <span class="status-badge status-${mongoStatus}">${mongoStatus}</span>
+                      </div>
+                  </div>
+                  <div class="info-item">
+                      <div class="info-label">Redis</div>
+                      <div class="info-value">
+                        <span class="status-badge status-${redisStatus}">${redisStatus}</span>
+                      </div>
+                  </div>
+                  <div class="info-item">
+                      <div class="info-label">LiveKit</div>
+                      <div class="info-value">
+                        <span class="status-badge status-${livekitStatus}">${livekitStatus}</span>
+                      </div>
+                  </div>
+                  <div class="info-item">
                       <div class="info-label">Environment</div>
-                      <div class="info-value">Development</div>
-                  </div>
-                  <div class="info-item">
-                      <div class="info-label">Framework</div>
-                      <div class="info-value">Fastify v4</div>
-                  </div>
-                  <div class="info-item">
-                      <div class="info-label">Port</div>
-                      <div class="info-value">${config.port}</div>
-                  </div>
-                  <div class="info-item">
-                      <div class="info-label">Node version</div>
-                      <div class="info-value">${process.version}</div>
+                      <div class="info-value">${config.env}</div>
                   </div>
               </div>
               <div class="footer">
@@ -139,7 +181,52 @@ const healthRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
   // Health check API routes
   app.get("/live", async () => ({ status: "ok", type: "liveness" }));
-  app.get("/ready", async () => ({ status: "ok", type: "readiness" }));
+
+  app.get("/ready", async (request, reply) => {
+    const health = {
+      mongodb: false,
+      redis: false,
+      livekit: false
+    };
+
+    try {
+      const db = await connectMongo();
+      const ping = await db.command({ ping: 1 });
+      health.mongodb = !!ping.ok;
+    } catch (e) {
+      app.log.error("MongoDB health check failed");
+    }
+
+    try {
+      const redis = getRedisClient();
+      const ping = await redis.ping();
+      health.redis = ping === "PONG";
+    } catch (e) {
+      app.log.error("Redis health check failed");
+    }
+
+    try {
+      health.livekit = await checkLiveKitHealth();
+    } catch (e) {
+      app.log.error("LiveKit health check failed");
+    }
+
+    const isReady = Object.values(health).every(v => v === true);
+
+    if (!isReady) {
+      return reply.status(503).send({
+        status: "unhealthy",
+        type: "readiness",
+        details: health
+      });
+    }
+
+    return {
+      status: "ok",
+      type: "readiness",
+      details: health
+    };
+  });
 };
 
 export default healthRoutes;
