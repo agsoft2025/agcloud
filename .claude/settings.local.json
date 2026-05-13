@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(git checkout *)",
-      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\venkat\\\\Documents\\\\codebase\\\\agcloud\" | Where-Object { -not $_.PSIsContainer } | Select-Object Name)",
-      "PowerShell(Get-ChildItem *)"
-    ]
-  }
-}
