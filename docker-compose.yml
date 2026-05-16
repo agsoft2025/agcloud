@@ -58,21 +58,8 @@ services:
     volumes:
       - ./backend:/app
 
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    environment:
-      - VITE_API_BASE_URL=http://localhost:3000
-      - VITE_LIVEKIT_URL=ws://localhost:7880
-    ports:
-      - "4173:4173"
-    volumes:
-      - ./frontend:/app
-    command: ["pnpm", "dev", "--host", "0.0.0.0", "--port", "4173"]
-    depends_on:
-      - backend
+  # Web frontend is maintained in a separate repo: https://github.com/agsoft2025/agcloudfrontend
+  # Run it independently with: cd ../agcloudfrontend && pnpm dev
 
 volumes:
   mongo-data:

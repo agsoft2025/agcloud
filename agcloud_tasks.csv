@@ -1,0 +1,136 @@
+Task_ID,Assignee,Phase,Module,Task_Name,Description,Priority,Status,Depends_On
+V-01,Venkat,1 - Setup,Architecture,Resolve frontend framework,Final call: SvelteKit (per spec) vs React (current package.json). Unblocks all Nishant tasks.,Critical,Completed,
+V-02,Venkat,1 - Setup,Architecture,Decide mobile framework,Choose React Native vs Flutter for iOS + Android apps. Drives all M-series tasks.,Critical,Completed,
+V-03,Venkat,1 - Setup,Architecture,Finalize API contracts,Document all REST endpoints (request/response schemas). Share with Nishant and Vipin before they start.,High,Completed,
+V-04,Venkat,1 - Setup,Infrastructure,Docker Compose local env,Verify docker-compose.yml brings up all services (mongo + redis + livekit + backend + frontend).,High,To Do,
+V-05,Venkat,1 - Setup,Infrastructure,Environment variables setup,Create .env files from .env.example for all services. Distribute securely. Confirm LiveKit API key/secret.,High,To Do,
+V-06,Venkat,1 - Setup,Infrastructure,Git branching strategy,Define branch naming (feature/fix/chore) PR review process and protected main branch rules.,Medium,To Do,
+V-07,Venkat,1 - Setup,LiveKit,LiveKit server config,Review and finalize infrastructure/livekit/livekit.yaml — ports TURN auth keys Egress config.,Medium,To Do,V-05
+V-08,Venkat,1 - Setup,Backend,Install all backend packages,Add: pino argon2 mongoose prom-client @opentelemetry/sdk-node firebase-admin node-apn p-retry opossum vitest supertest @fastify/cors @fastify/helmet @fastify/rate-limit,Critical,To Do,
+V-09,Venkat,1 - Setup,Database,MongoDB connection,Implement shared/db/mongo.client.ts — Mongoose connection with retry logic and graceful disconnect.,High,To Do,V-08
+V-10,Venkat,1 - Setup,Database,Redis connection,Implement shared/db/redis.client.ts — ioredis client with cluster support and reconnect strategy.,High,To Do,V-08
+V-11,Venkat,1 - Setup,Database,MongoDB User schema,Define Mongoose User model: _id email passwordHash displayName avatarUrl contacts blocklist pushTokens timestamps. Share with Vipin.,High,To Do,V-09
+V-12,Venkat,1 - Setup,Database,MongoDB Call schema,Define Mongoose Call model: _id initiator callee status roomName startTime endTime duration CDR timestamps. Share with Vipin.,High,To Do,V-09
+V-13,Venkat,1 - Setup,Database,Redis key naming conventions,Define Redis key patterns and TTL values (presence call-state rate-limit idempotency). Share with Vipin.,High,To Do,V-10
+V-14,Venkat,1 - Setup,Observability,Pino logger setup,Implement shared/observability/logger.ts — JSON structured logging with PII redaction (password email tokens).,High,To Do,V-08
+V-15,Venkat,1 - Setup,Observability,Prometheus metrics,Implement shared/observability/metrics.ts — RED metrics + business metrics (call duration acceptance rate).,Medium,To Do,V-08
+V-16,Venkat,1 - Setup,Observability,OpenTelemetry tracing,Implement shared/observability/tracing.ts — OTLP exporter with span propagation.,Medium,To Do,V-08
+V-17,Venkat,2 - Core,LiveKit,LiveKit room creation service,Implement modules/livekit — create/delete rooms via livekit-server-sdk. Handle errors with retry.,High,To Do,V-08 V-07
+V-18,Venkat,2 - Core,LiveKit,LiveKit token generation,Per-user per-room tokens with correct grants (canPublish canSubscribe).,High,To Do,V-17
+V-19,Venkat,2 - Core,LiveKit,POST /api/webhooks/livekit,Webhook handler with LiveKit signature verification. Handle: participant_joined participant_left room_finished.,High,To Do,V-17
+V-20,Venkat,2 - Core,Database,Call state machine (Redis),Implement modules/call/call.state-machine.ts — Redis-backed transitions with TTL=1h. Write final state to MongoDB.,High,To Do,V-10 V-12 V-13
+V-21,Venkat,2 - Core,Notifications,FCM service setup,Set up firebase-admin. Implement notification service send method for Android/Web push.,High,To Do,V-08
+V-22,Venkat,2 - Core,Notifications,APNs service setup,Add node-apn. Implement send method for iOS push notifications.,Medium,To Do,V-21
+V-23,Venkat,2 - Core,Reliability,Retry logic (p-retry),Implement shared/utils/retry.ts — exponential backoff for external calls (LiveKit FCM APNs).,Medium,To Do,V-08
+V-24,Venkat,2 - Core,Reliability,Circuit breaker (opossum),Implement shared/utils/circuit-breaker.ts — wrap LiveKit FCM APNs with opossum.,Medium,To Do,V-23
+V-25,Venkat,2 - Core,Reliability,Idempotency middleware,Implement shared/utils/idempotency.ts — Redis-backed deduplication using Idempotency-Key header.,Medium,To Do,V-10
+V-26,Venkat,2 - Core,Health,Health check endpoints,Implement /health/live (always 200) and /health/ready (checks MongoDB + Redis + LiveKit). /metrics for Prometheus.,High,To Do,V-09 V-10 V-17
+V-27,Venkat,2 - Core,Project Management,Weekly architecture review,Weekly sync with Nishant and Vipin. Review progress and resolve blockers.,Medium,To Do,
+V-28,Venkat,3 - Advanced,Infrastructure,CI/CD pipeline (GitHub Actions),Lint + typecheck + test on PR. Build and push Docker images on merge to main.,Medium,To Do,V-06
+V-29,Venkat,3 - Advanced,Infrastructure,Observability stack (local),Configure Prometheus + Grafana + Jaeger via Docker Compose for team development.,Medium,To Do,V-04 V-15 V-16
+V-30,Venkat,3 - Advanced,Security,Security audit — Auth,Review Vipin auth implementation: JWT handling refresh token rotation rate limiting OWASP Top 10.,High,To Do,B-11
+V-31,Venkat,3 - Advanced,Architecture,Performance review,Validate backend latency (<500ms p99) and frontend bundle size (<80KB gzip) before release.,Medium,Completed,B-24 N-46
+V-32,Venkat,3 - Advanced,Infrastructure,Kubernetes Helm charts,Finalize Helm chart templates in infrastructure/helm/ for backend frontend livekit and proxy.,Low,To Do,V-28
+,,,,,,,,
+M-01,Venkat,1 - Setup,Mobile,Mobile project setup,Scaffold mobile app using chosen framework (React Native or Flutter). Configure TypeScript/Dart strict mode.,Critical,To Do,V-02
+M-02,Venkat,1 - Setup,Mobile,Mobile project structure,Set up folder structure: screens/ components/ services/ stores/ navigation/. Mirror backend module boundaries.,High,To Do,M-01
+M-03,Venkat,1 - Setup,Mobile,Navigation setup,Configure stack and tab navigators. Define all routes: auth stack home call settings.,High,To Do,M-01
+M-04,Venkat,1 - Setup,Mobile,Mobile API client,Fetch/Dio wrapper — attach access token auto-refresh on 401 retry original request.,Critical,To Do,M-01 V-03
+M-05,Venkat,1 - Setup,Mobile,Push notification setup (FCM + APNs),Integrate Firebase Messaging (Android/Web) and APNs (iOS). Request permissions on first launch. Register device token with backend.,High,To Do,M-01 V-21 V-22
+M-06,Venkat,1 - Setup,Mobile,LiveKit mobile SDK integration,Add livekit-client-sdk-react-native or livekit-client-sdk-flutter. Configure native permissions (camera mic).,Critical,To Do,M-01 V-07
+M-07,Venkat,2 - Core,Mobile,Auth screens,Login signup forgot-password reset-password screens. Form validation. Secure token storage (Keychain/Keystore).,High,To Do,M-04
+M-08,Venkat,2 - Core,Mobile,Home screen,Contact list with presence indicators and recent call history. Pull-to-refresh. Tap contact to initiate call.,Critical,To Do,M-04 M-07
+M-09,Venkat,2 - Core,Mobile,Contact detail screen,Avatar name presence status. Call button. Block/unblock action.,Medium,To Do,M-08
+M-10,Venkat,2 - Core,Mobile,Incoming call screen,Full-screen overlay when push received — caller name avatar. Accept and Reject buttons. Ringtone.,Critical,To Do,M-05 M-06
+M-11,Venkat,2 - Core,Mobile,Active call screen,Local + remote video tiles. Mute camera end-call controls. Speaker toggle. Network quality indicator.,Critical,To Do,M-06 M-10
+M-12,Venkat,2 - Core,Mobile,LiveKit room connection,Connect to room on call accepted. Publish local audio/video tracks. Subscribe to remote tracks. Handle disconnects.,Critical,To Do,M-06
+M-13,Venkat,2 - Core,Mobile,Call controls component,Mute/unmute camera on/off speaker toggle end-call. Reflect track state in UI.,High,To Do,M-12
+M-14,Venkat,2 - Core,Mobile,Call history screen,List of past calls — caller/callee duration timestamp status. Tap to see detail.,Medium,To Do,M-04
+M-15,Venkat,2 - Core,Mobile,Settings screens,Profile edit (name avatar). Device selection. Notification preferences. Privacy/blocklist.,Medium,To Do,M-04
+M-16,Venkat,2 - Core,Mobile,Background call handling,Handle incoming call push when app is backgrounded/killed. Native call UI (CallKit iOS / ConnectionService Android).,High,To Do,M-05 M-10
+M-17,Venkat,2 - Core,Mobile,Auth state persistence,Persist tokens securely (Keychain iOS / Keystore Android). Auto-login on app resume. Refresh on expiry.,High,To Do,M-07
+M-18,Venkat,3 - Advanced,Mobile,Screen sharing (mobile),Enable screen share track publish during active call. Handle permission prompts on iOS and Android.,Medium,To Do,M-12
+M-19,Venkat,3 - Advanced,Mobile,Offline and reconnect handling,Detect network loss during call. Attempt reconnect. Show user-facing status. Resume or end gracefully.,High,To Do,M-12
+M-20,Venkat,3 - Advanced,Mobile,Mobile accessibility,VoiceOver (iOS) and TalkBack (Android) support across all screens. Focus order and labels.,Medium,To Do,M-11 M-15
+M-21,Venkat,3 - Advanced,Mobile,App store preparation,Configure app signing (iOS provisioning + Android keystore). Set app icons splash screen metadata. Prepare store listings.,High,To Do,M-11
+M-22,Venkat,3 - Advanced,Mobile,Mobile E2E testing,Detox (React Native) or Patrol (Flutter) tests: auth flow call initiate/accept/end.,Medium,To Do,M-11
+,,,,,,,,
+B-01,Vipin,1 - Setup,Backend,Config module (Zod env validation),Implement backend/src/config/index.ts — parse and type all env vars with Zod. Fail fast on missing required vars.,High,To Do,V-08
+B-02,Vipin,1 - Setup,Middleware,Request ID middleware,Implement shared/middleware/request-id.ts — generate UUID per request propagate to response headers and logger.,Medium,To Do,V-14
+B-03,Vipin,1 - Setup,Middleware,RFC 7807 error handler,Implement shared/middleware/error-handler.ts — standard problem+json error responses with correct HTTP status codes.,High,To Do,V-14
+B-04,Vipin,1 - Setup,Security,Argon2id password hashing,Implement shared/security/argon2.ts — hash and verify with memoryCost=19456 timeCost=2 parallelism=1.,High,To Do,V-08
+B-05,Vipin,1 - Setup,Security,JWT access token utility,Implement shared/security/jwt.ts — sign and verify 15-min access tokens.,High,To Do,V-08
+B-06,Vipin,1 - Setup,Security,Refresh token rotation,7-day tokens hashed in MongoDB with reuse detection and family invalidation.,High,To Do,V-11 B-05
+B-07,Vipin,2 - Core,Middleware,Auth middleware (JWT verify),Implement shared/middleware/auth.middleware.ts — extract Bearer token verify signature attach user to request.,High,To Do,B-05
+B-08,Vipin,2 - Core,Middleware,Rate limiting middleware,Per-IP (login/signup) and per-user (API) limits via Redis. Use @fastify/rate-limit with Redis store.,High,To Do,V-10
+B-09,Vipin,2 - Core,Auth,POST /api/auth/signup,Validate input hash password create User doc issue access + refresh tokens. Return 201 + token pair.,High,To Do,B-04 B-05 V-11
+B-10,Vipin,2 - Core,Auth,POST /api/auth/signin,Verify credentials issue token pair set refresh cookie. 401 on bad credentials. Rate limited.,High,To Do,B-04 B-05 V-11
+B-11,Vipin,2 - Core,Auth,POST /api/auth/refresh,Rotate refresh token — verify old hash issue new pair invalidate old. Detect reuse → revoke entire family.,High,To Do,B-06
+B-12,Vipin,2 - Core,Auth,POST /api/auth/logout,Revoke refresh token from MongoDB. Clear cookie.,Medium,To Do,B-06
+B-13,Vipin,2 - Core,Auth,POST /api/auth/forgot-password,Generate time-limited reset token (hashed in DB) and trigger email with reset link.,Medium,To Do,V-11
+B-14,Vipin,2 - Core,Auth,POST /api/auth/reset-password,Verify reset token hash new password invalidate all refresh tokens for user.,Medium,To Do,B-13
+B-15,Vipin,2 - Core,User,GET + PUT /api/users/me,Read and update authenticated user profile (displayName avatarUrl).,High,To Do,B-07 V-11
+B-16,Vipin,2 - Core,User,GET /api/users/:id,Get another user public profile. Return 404 if caller is blocked.,Medium,To Do,B-07 V-11
+B-17,Vipin,2 - Core,User,Contacts API,POST /api/users/contacts (add) DELETE /api/users/contacts/:id (remove) GET /api/users/contacts (list).,High,To Do,B-15
+B-18,Vipin,2 - Core,User,Blocklist API,POST /api/users/blocklist/:id (block) DELETE /api/users/blocklist/:id (unblock).,Medium,To Do,B-15
+B-19,Vipin,2 - Core,User,Presence endpoints,GET /api/users/presence?ids=[] — batch lookup from Redis. Update own presence on connect/disconnect.,High,To Do,B-07 V-10 V-13
+B-20,Vipin,2 - Core,Call,POST /api/calls/initiate,Validate callee not blocked/busy. Trigger state machine. Request LiveKit room + send push. Return callId + token.,Critical,To Do,V-20 V-18 V-21 B-07
+B-21,Vipin,2 - Core,Call,POST /api/calls/:id/accept,Transition state to accepted via state machine. Generate callee LiveKit token. Return token.,Critical,To Do,V-20 V-18
+B-22,Vipin,2 - Core,Call,POST /api/calls/:id/reject,Transition state to rejected. Notify caller.,High,To Do,V-20
+B-23,Vipin,2 - Core,Call,POST /api/calls/:id/end + cancel,End call from either party. Transition to ended/cancelled. CDR written to MongoDB by state machine.,High,To Do,V-20
+B-24,Vipin,2 - Core,Call,GET /api/calls/history,Paginated call history for authenticated user from MongoDB.,Medium,To Do,B-07 V-12
+B-25,Vipin,2 - Core,LiveKit,POST /api/livekit/token,Endpoint to issue LiveKit room token for authenticated user. Calls Venkat LiveKit token service.,High,To Do,V-18 B-07
+B-26,Vipin,2 - Core,Notifications,Notification trigger logic,Business logic for when to send push (incoming call missed call). Calls Venkat FCM/APNs service.,High,To Do,V-21 V-22
+B-27,Vipin,3 - Advanced,Testing,Unit tests — auth & security,Vitest unit tests for JWT helpers argon2 hashing and refresh token rotation logic.,High,To Do,B-09 B-10 B-11
+B-28,Vipin,3 - Advanced,Testing,Integration tests — auth flow,Supertest integration tests for full signup → signin → refresh → logout against real MongoDB + Redis.,High,To Do,B-27
+B-29,Vipin,3 - Advanced,Testing,Integration tests — call flow,Integration tests for initiate → accept → end call flow including state machine transitions.,High,To Do,B-20 B-21 B-23
+,,,,,,,,
+N-01,Nishant,1 - Setup,Web App,Framework setup,Set up SvelteKit project with TypeScript strict mode (await V-01 decision). Remove React deps if switching.,Critical,To Do,V-01
+N-02,Nishant,1 - Setup,Web App,Vite + path aliases config,Configure vite.config.ts with path aliases ($lib $routes $components). Verify HMR works.,High,To Do,N-01
+N-03,Nishant,1 - Setup,Web App,CSS framework setup,Install and configure PicoCSS + Open Props. Set up global CSS variables for design tokens.,Medium,To Do,N-01
+N-04,Nishant,1 - Setup,Web App,PWA manifest + service worker,Configure manifest.webmanifest (name icons theme_color). Scaffold service-worker.ts for offline caching.,Medium,To Do,N-01
+N-05,Nishant,1 - Setup,Web App,Test setup,Configure Vitest for unit tests and Playwright for E2E. Verify both runners with a sample test.,Medium,To Do,N-01
+N-06,Nishant,1 - Setup,API,API client (fetch wrapper),Implement lib/api/client.ts — attach access token auto-refresh on 401 retry original request.,Critical,To Do,N-01 V-03
+N-07,Nishant,2 - Core,State,auth.store.ts,Svelte store for current user JWT tokens and session state. Persist to localStorage with SSR-safe guard.,High,To Do,N-06
+N-08,Nishant,2 - Core,State,call.store.ts,Store for active call state: callId status localTracks remoteTracks participantList.,High,To Do,N-07
+N-09,Nishant,2 - Core,State,user.store.ts,Store for user profile cache (Map of userId to profile). Hydrated from API on demand.,Medium,To Do,N-07
+N-10,Nishant,2 - Core,State,presence.store.ts,Store for contact presence (online/offline/last-seen). Poll /api/users/presence for updates.,High,To Do,N-07
+N-11,Nishant,2 - Core,State,toast.store.ts,Global toast notification queue. Auto-dismiss with configurable duration.,Medium,To Do,N-01
+N-12,Nishant,2 - Core,LiveKit,LiveKitClient.ts,Implement lib/livekit/LiveKitClient.ts — connect/disconnect to room publish/subscribe local tracks handle events.,Critical,To Do,N-08
+N-13,Nishant,2 - Core,LiveKit,useCall.ts (Svelte action),Bind LiveKit room events to call.store. Handle participant joined/left track published/unpublished.,High,To Do,N-12
+N-14,Nishant,2 - Core,LiveKit,audio-output.ts,Enumerate audio output devices. Allow user to switch speaker during call.,Medium,To Do,N-12
+N-15,Nishant,2 - Core,Components,Button atom,Button component — variants: primary secondary ghost danger. Props: loading disabled size. Keyboard focusable.,High,To Do,N-03
+N-16,Nishant,2 - Core,Components,Input atom,Input component — text and password. Shows validation error. Accessible label + aria-describedby.,High,To Do,N-03
+N-17,Nishant,2 - Core,Components,Avatar atom,Avatar with fallback initials. Optional online indicator badge. Sizes: sm md lg.,Medium,To Do,N-03
+N-18,Nishant,2 - Core,Components,Badge atom,Badge for call status and notification count. Colour variants.,Medium,To Do,N-03
+N-19,Nishant,2 - Core,Components,Spinner + Skeleton,Spinner for button/page loading. Skeleton cards for contact list and call history.,Medium,To Do,N-03
+N-20,Nishant,2 - Core,Components,Modal molecule,Accessible modal — focus trap keyboard Escape to close aria-modal. Slot-based content.,High,To Do,N-15
+N-21,Nishant,2 - Core,Components,Toast molecule,Toast notification — success error info variants. Auto-dismiss. Wired to toast.store.,High,To Do,N-11 N-03
+N-22,Nishant,2 - Core,Components,DropdownMenu molecule,Accessible dropdown for settings and contacts actions. Keyboard navigable.,Medium,To Do,N-15
+N-23,Nishant,2 - Core,Components,VideoTile component,Render participant video track. Show mute indicator name tag and network quality badge.,Critical,To Do,N-13 N-18
+N-24,Nishant,2 - Core,Components,CallControls component,Mute/unmute camera on/off screen share end call buttons. Show active state. Keyboard accessible.,Critical,To Do,N-13 N-15
+N-25,Nishant,2 - Core,Components,IncomingCallOverlay component,Full-screen overlay — caller avatar and name. Accept (green) and Reject (red) buttons with ring animation.,Critical,To Do,N-13 N-17 N-15
+N-26,Nishant,2 - Core,Components,ParticipantList component,Sidebar showing all participants — avatar name mute/camera status. For group calls.,Medium,To Do,N-23
+N-27,Nishant,2 - Core,Components,NetworkIndicator component,Signal bars showing LiveKit connection quality. Updates from room.connectionQuality events.,Medium,To Do,N-13
+N-28,Nishant,2 - Core,Pages,/signin page,Email + password form. Zod validation. Links to /signup and /forgot-password. Redirect to /home on success.,High,To Do,N-07 N-15 N-16
+N-29,Nishant,2 - Core,Pages,/signup page,Display name + email + password form. Zod validation. Auto-signin on success. Redirect to /home.,High,To Do,N-07 N-15 N-16
+N-30,Nishant,2 - Core,Pages,/forgot-password page,Email input. POST to /api/auth/forgot-password. Show success message.,Medium,To Do,N-06 N-15 N-16
+N-31,Nishant,2 - Core,Pages,/reset-password page,New password + confirm. Read token from URL. POST to /api/auth/reset-password.,Medium,To Do,N-06 N-30
+N-32,Nishant,2 - Core,Pages,/home page,Contact list with presence indicators and recent call history. Click contact to call. Skeleton loading.,Critical,To Do,N-09 N-10 N-19
+N-33,Nishant,2 - Core,Pages,/contacts/[id] page,Contact profile — avatar name status. Call button. Block/unblock option.,Medium,To Do,N-09 N-10 N-17
+N-34,Nishant,2 - Core,Pages,/calls/[id] page,Detail view of a past call — participants duration timestamp status.,Medium,To Do,N-09
+N-35,Nishant,2 - Core,Pages,/call/[roomName] page,Full-screen call UI — VideoTile grid CallControls IncomingCallOverlay ParticipantList NetworkIndicator.,Critical,To Do,N-23 N-24 N-25 N-26 N-27
+N-36,Nishant,2 - Core,Pages,/settings/profile page,Edit displayName and avatar upload. PUT /api/users/me.,Medium,To Do,N-06 N-07
+N-37,Nishant,2 - Core,Pages,/settings/devices page,List and select camera microphone and speaker devices. Persist preference to localStorage.,Medium,To Do,N-14
+N-38,Nishant,2 - Core,Pages,/settings/notifications page,Toggle push notification permission. Register/unregister FCM token with backend.,Medium,To Do,N-06
+N-39,Nishant,2 - Core,Pages,/settings/privacy page,Manage blocklist. Show blocked users with unblock action.,Medium,To Do,N-06
+N-40,Nishant,2 - Core,API,Auth API module,lib/api/auth.api.ts — signup signin refresh logout forgot-password reset-password wrappers.,High,To Do,N-06
+N-41,Nishant,2 - Core,API,User API module,lib/api/user.api.ts — getMe updateMe getUser contacts blocklist presence.,High,To Do,N-06
+N-42,Nishant,2 - Core,API,Call API module,lib/api/call.api.ts — initiateCall acceptCall rejectCall endCall callHistory.,High,To Do,N-06
+N-43,Nishant,3 - Advanced,Web App,Web push notification registration,Register service worker. Request notification permission. POST FCM token to backend on login.,High,To Do,N-04 N-07
+N-44,Nishant,3 - Advanced,Web App,Dark mode support,Add light/dark CSS variable sets. Toggle based on system preference with manual override.,Medium,To Do,N-03
+N-45,Nishant,3 - Advanced,Accessibility,Accessibility audit,WCAG 2.1 AA audit across all pages — focus management colour contrast screen reader flow.,High,To Do,N-35
+N-46,Nishant,3 - Advanced,Performance,Bundle size optimization,Verify initial JS bundle <80KB gzip. Tree-shake icons. Lazy-load call page and settings routes.,High,To Do,N-35
+N-47,Nishant,3 - Advanced,Testing,Unit tests — stores & utils,Vitest tests for auth.store call.store and API client token refresh logic.,Medium,To Do,N-07 N-08
+N-48,Nishant,3 - Advanced,Testing,E2E tests — auth flow,Playwright test: signup to signin to redirect to /home to signout.,High,To Do,N-29 N-28
+N-49,Nishant,3 - Advanced,Testing,E2E tests — call flow,Playwright test: user A initiates call. User B accepts. Both see video. End call.,High,To Do,N-35 N-48
