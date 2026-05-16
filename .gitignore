@@ -1,0 +1,23 @@
+# Nested repo — tracked separately at github.com/agsoft2025/agcloudfrontend
+agcloudfrontend/
+
+# Dependencies
+node_modules/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Build output
+dist/
+build/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
