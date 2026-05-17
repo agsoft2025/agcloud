@@ -1,46 +1,30 @@
-# LiveKit server configuration for agcloud
-
-# Basic example values. Replace with your environment-specific settings.
+port: 7880
 
 rtc:
-  port: 7880
-  tls:
-    cert: /etc/livekit/cert.pem
-    key: /etc/livekit/key.pem
+  udp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50010
+  use_external_ip: false  # false for Docker Desktop on Windows/Mac (VM networking)
 
-api:
-  port: 7880
-
-signal:
-  port: 7880
-
-turn:
-  # LiveKit can serve TURN on port 443 for firewall-friendly fallback.
-  host: 0.0.0.0
-  port: 443
-  tls:
-    cert: /etc/livekit/cert.pem
-    key: /etc/livekit/key.pem
+keys:
+  local: local_secret  # format: apiKey: apiSecret
 
 redis:
-  url: redis://redis:6379
+  address: redis:6379
 
-database:
-  url: mongodb://mongo:27017/livekit
-
-auth:
-  api_key: "YOUR_LIVEKIT_API_KEY"
-  api_secret: "YOUR_LIVEKIT_API_SECRET"
+webhook:
+  urls:
+    - http://agcloud-api:3000/api/webhooks/livekit
+  api_key: local
 
 logging:
   level: info
 
-# Optional: egress storage settings for recordings
-# egress:
+# TURN and TLS not required for local dev.
+# Uncomment for production:
+# turn:
 #   enabled: true
-#   provider: s3
-#   s3:
-#     bucket: agcloud-recordings
-#     region: us-east-1
-#     access_key: YOUR_ACCESS_KEY
-#     secret_key: YOUR_SECRET_KEY
+#   domain: livekit.yourdomain.com
+#   tls_port: 5349
+#   udp_port: 3478
+#   external_tls: true

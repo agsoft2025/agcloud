@@ -55,7 +55,7 @@ M-20,Venkat,3 - Advanced,Mobile,Mobile accessibility,VoiceOver (iOS) and TalkBac
 M-21,Venkat,3 - Advanced,Mobile,App store preparation,Configure app signing (iOS provisioning + Android keystore). Set app icons splash screen metadata. Prepare store listings.,High,To Do,M-11
 M-22,Venkat,3 - Advanced,Mobile,Mobile E2E testing,Detox (React Native) or Patrol (Flutter) tests: auth flow call initiate/accept/end.,Medium,To Do,M-11
 ,,,,,,,,
-B-01,Vipin,1 - Setup,Backend,Config module (Zod env validation),Implement backend/src/config/index.ts — parse and type all env vars with Zod. Fail fast on missing required vars.,High,To Do,V-08
+B-01,Vipin,1 - Setup,Backend,Config module (Zod env validation),Implement agcloud-api/src/config/index.ts — parse and type all env vars with Zod. Fail fast on missing required vars.,High,To Do,V-08
 B-02,Vipin,1 - Setup,Middleware,Request ID middleware,Implement shared/middleware/request-id.ts — generate UUID per request propagate to response headers and logger.,Medium,To Do,V-14
 B-03,Vipin,1 - Setup,Middleware,RFC 7807 error handler,Implement shared/middleware/error-handler.ts — standard problem+json error responses with correct HTTP status codes.,High,To Do,V-14
 B-04,Vipin,1 - Setup,Security,Argon2id password hashing,Implement shared/security/argon2.ts — hash and verify with memoryCost=19456 timeCost=2 parallelism=1.,High,To Do,V-08

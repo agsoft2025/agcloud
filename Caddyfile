@@ -1,10 +1,10 @@
 http://localhost {
     route /api/* {
-        reverse_proxy backend:3000
+        reverse_proxy agcloud-api:3000
     }
 
     route /livekit-webhook {
-        reverse_proxy backend:3000
+        reverse_proxy agcloud-api:3000
     }
 
     route /rtc* {

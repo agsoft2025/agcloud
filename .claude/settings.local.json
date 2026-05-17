@@ -3,7 +3,36 @@
     "allow": [
       "Bash(git checkout *)",
       "PowerShell(Get-ChildItem \"C:\\\\Users\\\\venkat\\\\Documents\\\\codebase\\\\agcloud\" | Where-Object { -not $_.PSIsContainer } | Select-Object Name)",
-      "PowerShell(Get-ChildItem *)"
+      "PowerShell(Get-ChildItem *)",
+      "Bash(Get-ChildItem -Path \"D:\\\\venkat\\\\agcloud\" -Recurse -Depth 2)",
+      "Bash(Select-Object FullName, PSIsContainer)",
+      "Bash(ConvertTo-Json)",
+      "Bash(ConvertFrom-Json)",
+      "Bash(Format-Table -Property FullName, PSIsContainer -AutoSize)",
+      "Bash(git *)",
+      "Bash(cd /d D:\\\\venkat\\\\agcloud)",
+      "Bash(python gen_tasks.py)",
+      "Bash(gh pr *)",
+      "Bash(gh api *)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(gh auth *)",
+      "PowerShell(Get-Command *)",
+      "PowerShell(& \"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\" auth status)",
+      "PowerShell(& \"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\" pr list --repo agsoft2025/agcloud)",
+      "PowerShell(& \"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\" pr list --repo agsoft2025/agcloudfrontend)",
+      "PowerShell(& \"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\" pr review 2 --repo agsoft2025/agcloud --comment --body-file \"D:\\\\venkat\\\\agcloud\\\\.tmp_backend_review.md\")",
+      "PowerShell(& \"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\" issue create --repo agsoft2025/agcloudfrontend --title \"Code Review — Initial Commit\" --body-file \"D:\\\\venkat\\\\agcloud\\\\agcloudfrontend\\\\.tmp_frontend_review.md\")",
+      "Bash(Get-ChildItem -Path \"D:\\\\venkat\\\\agcloud\\\\infrastructure\" -Recurse -File)",
+      "Bash(Select-Object FullName)",
+      "Bash(Sort-Object)",
+      "Bash(Get-Content *)",
+      "PowerShell(Get-Item *)",
+      "Bash(findstr \".env\")",
+      "Bash(Get-ChildItem D:\\\\venkat\\\\agcloud\\\\backend *)",
+      "Bash(npm view *)",
+      "Bash(npm install *)"
     ]
   }
 }
