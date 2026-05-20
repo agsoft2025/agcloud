@@ -4,6 +4,7 @@ import cookie from "@fastify/cookie";
 import authRoutes from "./modules/auth/auth.routes.js";
 import callRoutes from "./modules/call/call.routes.js";
 import healthRoutes from "./modules/health/health.routes.js";
+import livekitRoutes from "./modules/livekit/livekit.routes.js";
 import config from "./config/index.js";
 
 export async function buildApp() {
@@ -24,6 +25,7 @@ export async function buildApp() {
 	await app.register(healthRoutes);
 	await app.register(authRoutes, { prefix: "/auth" });
 	await app.register(callRoutes, { prefix: "/calls" });
+	await app.register(livekitRoutes, { prefix: "/livekit" });
 
 	app.decorate("config", config);
 

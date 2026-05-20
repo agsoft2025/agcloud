@@ -7,16 +7,21 @@ const roomService = new RoomServiceClient(
   config.livekitApiSecret
 );
 
-export function createLiveKitToken(identity: string) {
+export async function createLiveKitToken(identity: string, roomName: string) {
   const at = new AccessToken(config.livekitApiKey, config.livekitApiSecret, {
     identity,
     ttl: 60 * 60
   });
 
-  const grant: VideoGrant = {};
+  const grant: VideoGrant = {
+    roomJoin: true,
+    room: roomName,
+    canPublish: true,
+    canSubscribe: true,
+  };
   at.addGrant(grant);
 
-  return at.toJwt();
+  return await at.toJwt();
 }
 
 export async function checkLiveKitHealth(): Promise<boolean> {

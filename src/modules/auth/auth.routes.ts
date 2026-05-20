@@ -32,7 +32,7 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       const token = jwt.sign(
         { userId: user._id.toString(), email: user.email },
         config.jwtSecret,
-        { expiresIn: "7d" }
+        { expiresIn: config.jwtAccessTokenExpiresIn as any }
       );
 
       reply.setCookie("token", token, {

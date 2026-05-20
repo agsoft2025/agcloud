@@ -18,7 +18,7 @@
     "fastify": "^4.25.0",
     "ioredis": "^5.3.2",
     "jsonwebtoken": "^9.0.0",
-    "livekit-server-sdk": "^2.0.0",
+    "livekit-server-sdk": "^2.15.3",
     "mongodb": "^6.0.0",
     "zod": "^4.4.2"
   },
