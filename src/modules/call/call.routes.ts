@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { initCallSchema } from "./call.schemas.js";
-import { createLiveKitToken } from "../livekit/livekit.service.js";
+import { createLiveKitToken, getLiveKitBaseUrl, startRoomRecording, stopRecording } from "../livekit/livekit.service.js";
 import { CallRepository } from "./call.repository.js";
 import { CallStateMachine } from "./call.state-machine.js";
 import { authenticate } from "../../shared/middleware/auth.middleware.js";
@@ -16,7 +16,9 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         "POST /calls/initiate - Initiate a new call",
         "POST /calls/:id/accept - Accept an incoming call",
         "POST /calls/:id/reject - Reject an incoming call",
-        "POST /calls/:id/end - Hang up / end a call"
+        "POST /calls/:id/end - Hang up / end a call",
+        "POST /calls/:id/record/start - Start call recording",
+        "POST /calls/:id/record/stop - Stop call recording"
       ],
       message: "Call routes are active"
     };
@@ -27,7 +29,17 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     const body = initCallSchema.parse(request.body);
     const callerId = request.user!.userId;
 
-    if (callerId === body.calleeId) {
+    // Extract all receiver IDs (calleeId or receiverIds array)
+    let receiverIds = body.receiverIds || [];
+    if (receiverIds.length === 0 && body.calleeId) {
+      receiverIds = [body.calleeId];
+    }
+
+    if (receiverIds.length === 0) {
+      return reply.status(400).send({ message: "At least one receiver ID is required" });
+    }
+
+    if (receiverIds.includes(callerId)) {
       return reply.status(400).send({ message: "You cannot call yourself" });
     }
 
@@ -41,17 +53,24 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     }
 
     // Create call record in MongoDB
-    const callRecord = await callRepo.createCall(callerId, body.calleeId, body.callType);
-    const callIdStr = callRecord._id.toString();
+    const callRecord = await callRepo.createCall(
+      callerId,
+      receiverIds,
+      body.callType,
+      body.callMode,
+      body.recording
+    );
+    const roomId = callRecord.roomId || callRecord._id.toString();
 
     // Generate token for the caller
-    const token = await createLiveKitToken(callerId, callIdStr);
+    const token = await createLiveKitToken(callerId, roomId);
 
     return reply.status(201).send({
       message: "Call initiated successfully",
       call: callRecord,
       token,
-      roomName: callIdStr
+      roomName: roomId,
+      url: getLiveKitBaseUrl()
     });
   });
 
@@ -59,16 +78,17 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   app.post("/:id/accept", { preHandler: authenticate }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const calleeId = request.user!.userId;
-    console.log("<><>calleeId", calleeId)
     const callRecord = await callRepo.getCallById(id);
-    console.log("<><>callRecord", callRecord)
     if (!callRecord) {
       return reply.status(404).send({ message: "Call not found" });
     }
-    console.log("<><>callRecord", callRecord);
-    console.log("<><>calleeId", calleeId)
 
-    if (callRecord.calleeId !== calleeId) {
+    // Validate authorization: callee must be in the receivers list or equal to calleeId
+    const isAuthorized = callRecord.callMode === "conference"
+      ? callRecord.receiverIds.includes(calleeId)
+      : callRecord.calleeId === calleeId;
+
+    if (!isAuthorized) {
       return reply.status(403).send({ message: "You are not authorized to accept this call" });
     }
 
@@ -82,14 +102,17 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     await callRepo.updateCallStatus(id, "active");
     callRecord.status = "active";
 
+    const roomId = callRecord.roomId || id;
+
     // Generate token for the callee
-    const token = await createLiveKitToken(calleeId, id);
+    const token = await createLiveKitToken(calleeId, roomId);
 
     return reply.send({
       message: "Call accepted successfully",
       call: callRecord,
       token,
-      roomName: id
+      roomName: roomId,
+      url: getLiveKitBaseUrl()
     });
   });
 
@@ -103,7 +126,11 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       return reply.status(404).send({ message: "Call not found" });
     }
 
-    if (callRecord.calleeId !== calleeId) {
+    const isAuthorized = callRecord.callMode === "conference"
+      ? callRecord.receiverIds.includes(calleeId)
+      : callRecord.calleeId === calleeId;
+
+    if (!isAuthorized) {
       return reply.status(403).send({ message: "You are not authorized to reject this call" });
     }
 
@@ -128,7 +155,12 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       return reply.status(404).send({ message: "Call not found" });
     }
 
-    if (callRecord.callerId !== userId && callRecord.calleeId !== userId) {
+    const isAuthorized = callRecord.callerId === userId || 
+      (callRecord.callMode === "conference" 
+        ? callRecord.receiverIds.includes(userId) 
+        : callRecord.calleeId === userId);
+
+    if (!isAuthorized) {
       return reply.status(403).send({ message: "You are not authorized to end this call" });
     }
 
@@ -141,6 +173,64 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     await callRepo.updateCallStatus(id, "ended");
 
     return reply.send({ message: "Call ended successfully" });
+  });
+
+  // Start call recording (LiveKit Egress)
+  app.post("/:id/record/start", { preHandler: authenticate }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const userId = request.user!.userId;
+
+    const callRecord = await callRepo.getCallById(id);
+    if (!callRecord) {
+      return reply.status(404).send({ message: "Call not found" });
+    }
+
+    const isAuthorized = callRecord.callerId === userId || callRecord.receiverIds.includes(userId);
+    if (!isAuthorized) {
+      return reply.status(403).send({ message: "You are not authorized to record this call" });
+    }
+
+    // Start LiveKit Egress (recording)
+    const roomName = callRecord.roomId || id;
+    const timestamp = Date.now();
+    const fileOutput = { filepath: `/recordings/room-${roomName}-${timestamp}.mp4` };
+    const egress = await startRoomRecording(roomName, fileOutput);
+
+    await callRepo.updateCallStatus(id, callRecord.status, {
+      recording: true,
+      recordingStartedAt: new Date(),
+      egressId: egress.egressId
+    });
+
+    return reply.send({ message: "Call recording started successfully", egressId: egress.egressId });
+  });
+
+  // Stop call recording (LiveKit Egress)
+  app.post("/:id/record/stop", { preHandler: authenticate }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const userId = request.user!.userId;
+
+    const callRecord = await callRepo.getCallById(id);
+    if (!callRecord) {
+      return reply.status(404).send({ message: "Call not found" });
+    }
+
+    const isAuthorized = callRecord.callerId === userId || callRecord.receiverIds.includes(userId);
+    if (!isAuthorized) {
+      return reply.status(403).send({ message: "You are not authorized to stop recording this call" });
+    }
+
+    if (!callRecord.egressId) {
+      return reply.status(400).send({ message: "No active recording (egressId missing)" });
+    }
+
+    await stopRecording(callRecord.egressId);
+    await callRepo.updateCallStatus(id, callRecord.status, {
+      recording: false,
+      recordingEndedAt: new Date()
+    });
+
+    return reply.send({ message: "Call recording stopped successfully" });
   });
 
   // HTML WebRTC Tester Page

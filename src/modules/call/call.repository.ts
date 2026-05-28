@@ -8,17 +8,38 @@ export class CallRepository {
     return db.collection<CallDocument>("calls");
   }
 
-  async createCall(callerId: string, calleeId: string, callType: "audio" | "video"): Promise<CallDocument> {
+  async createCall(
+    callerId: string,
+    receiverIds: string[],
+    callType: "audio" | "video",
+    callMode: "one-to-one" | "conference",
+    recording = false
+  ): Promise<CallDocument> {
     const collection = await this.getCollection();
+    const calleeId = receiverIds[0] || "";
+
     const newCall: Call = {
       callerId,
       calleeId,
+      receiverIds,
+      callMode,
       status: "initiated",
       callType,
+      recording,
       createdAt: new Date(),
     };
 
     const result = await collection.insertOne(newCall as CallDocument);
+    const generatedCallId = result.insertedId.toString();
+
+    // Set roomId to the generated MongoDB Call _id string for simplicity and uniqueness
+    await collection.updateOne(
+      { _id: result.insertedId },
+      { $set: { roomId: generatedCallId } }
+    );
+
+    newCall.roomId = generatedCallId;
+
     return {
       _id: result.insertedId,
       ...newCall,
@@ -63,7 +84,11 @@ export class CallRepository {
   async getActiveCallForUser(userId: string): Promise<CallDocument | null> {
     const collection = await this.getCollection();
     return await collection.findOne({
-      $or: [{ callerId: userId }, { calleeId: userId }],
+      $or: [
+        { callerId: userId },
+        { calleeId: userId },
+        { receiverIds: userId }
+      ],
       status: { $in: ["initiated", "active"] },
     });
   }

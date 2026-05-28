@@ -1,4 +1,5 @@
-import { AccessToken, VideoGrant, RoomServiceClient } from "livekit-server-sdk";
+import { AccessToken, VideoGrant, RoomServiceClient, EgressClient } from "livekit-server-sdk";
+import type { RoomCompositeOptions } from "livekit-server-sdk/dist/EgressClient";
 import config from "../../config/index.js";
 
 const roomService = new RoomServiceClient(
@@ -6,6 +7,27 @@ const roomService = new RoomServiceClient(
   config.livekitApiKey,
   config.livekitApiSecret
 );
+
+const egressClient = new EgressClient(
+  config.livekitUrl,
+  config.livekitApiKey,
+  config.livekitApiSecret
+);
+// Start a room composite recording (egress)
+export async function startRoomRecording(roomName: string, fileOutput: { filepath: string }, options?: Partial<RoomCompositeOptions>) {
+  // fileOutput: { filepath: "/recordings/room-<roomName>-<timestamp>.mp4" }
+  // options: { layout, audioOnly, videoOnly, encodingOptions, ... }
+  return await egressClient.startRoomCompositeEgress(
+    roomName,
+    fileOutput,
+    options || {}
+  );
+}
+
+// Stop a recording by egressId
+export async function stopRecording(egressId: string) {
+  return await egressClient.stopEgress(egressId);
+}
 
 export async function createLiveKitToken(identity: string, roomName: string) {
   const at = new AccessToken(config.livekitApiKey, config.livekitApiSecret, {
