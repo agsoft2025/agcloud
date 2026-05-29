@@ -15,7 +15,9 @@ declare module "fastify" {
 
 export async function authenticate(request: FastifyRequest, reply: FastifyReply) {
   try {
-    const token = request.cookies.token;
+    const authHeader = request.headers.authorization;
+    const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : undefined;
+    const token = bearerToken || request.cookies.token;
 
     if (!token) {
       return reply.status(401).send({ message: "Authentication required" });

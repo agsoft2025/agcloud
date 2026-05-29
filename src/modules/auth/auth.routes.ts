@@ -34,17 +34,23 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         config.jwtSecret,
         { expiresIn: config.jwtAccessTokenExpiresIn as any }
       );
+      const secureCookie =
+        config.env === "production" ||
+        request.protocol === "https" ||
+        request.headers["x-forwarded-proto"] === "https";
 
       reply.setCookie("token", token, {
         path: "/",
         httpOnly: true,
-        secure: config.env === "production",
-        sameSite: "strict",
+        secure: secureCookie,
+        sameSite: secureCookie ? "none" : "lax",
         maxAge: 7 * 24 * 60 * 60, // 7 days
       });
 
       const responsePayload: any = {
         message: "Login successful",
+        accessToken: token,
+        token,
         user: {
           id: user._id,
           email: user.email,
@@ -54,10 +60,6 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
           avatarUrl: user.avatarUrl,
         },
       };
-
-      if (config.env !== "production") {
-        responsePayload.token = token;
-      }
 
       return reply.send(responsePayload);
     } catch (error: any) {
