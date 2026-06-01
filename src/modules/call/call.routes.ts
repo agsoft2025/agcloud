@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { initCallSchema } from "./call.schemas.js";
-import { createLiveKitToken, getLiveKitBaseUrl, startRoomRecording, stopRecording } from "../livekit/livekit.service.js";
+import { createLiveKitToken, endLiveKitRoom, getLiveKitBaseUrl, startRoomRecording, stopRecording } from "../livekit/livekit.service.js";
 import { CallRepository } from "./call.repository.js";
 import { CallStateMachine } from "./call.state-machine.js";
 import { authenticate } from "../../shared/middleware/auth.middleware.js";
@@ -72,6 +72,27 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       roomName: roomId,
       url: getLiveKitBaseUrl()
     });
+  });
+
+  app.get("/:id", { preHandler: authenticate }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const userId = request.user!.userId;
+
+    const callRecord = await callRepo.getCallById(id);
+    if (!callRecord) {
+      return reply.status(404).send({ message: "Call not found" });
+    }
+
+    const isAuthorized = callRecord.callerId === userId ||
+      (callRecord.callMode === "conference"
+        ? callRecord.receiverIds.includes(userId)
+        : callRecord.calleeId === userId);
+
+    if (!isAuthorized) {
+      return reply.status(403).send({ message: "You are not authorized to view this call" });
+    }
+
+    return reply.send({ call: callRecord });
   });
 
   // Accept a call
@@ -164,6 +185,11 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       return reply.status(403).send({ message: "You are not authorized to end this call" });
     }
 
+    if (callRecord.status === "ended") {
+      await endLiveKitRoom(callRecord.roomId || id);
+      return reply.send({ message: "Call already ended" });
+    }
+
     if (!CallStateMachine.isValidTransition(callRecord.status, "ended")) {
       return reply.status(400).send({
         message: `Cannot transition call from '${callRecord.status}' to 'ended'`
@@ -171,6 +197,7 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     }
 
     await callRepo.updateCallStatus(id, "ended");
+    await endLiveKitRoom(callRecord.roomId || id);
 
     return reply.send({ message: "Call ended successfully" });
   });

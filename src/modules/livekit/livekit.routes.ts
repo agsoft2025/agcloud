@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { WebhookReceiver } from "livekit-server-sdk";
 import { CallRepository } from "../call/call.repository.js";
+import { endLiveKitRoom } from "./livekit.service.js";
 import config from "../../config/index.js";
 
 const receiver = new WebhookReceiver(config.livekitApiKey, config.livekitApiSecret);
@@ -42,6 +43,21 @@ const livekitRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         if (call && (call.status === "active" || call.status === "initiated")) {
           await callRepo.updateCallStatus(roomName, "ended");
           console.log(`Call ${roomName} automatically ended via LiveKit Webhook (room_finished).`);
+        }
+      }
+    }
+
+    if (event.event === "participant_left") {
+      const roomName = event.room?.name;
+      if (roomName) {
+        const call = await callRepo.getCallById(roomName);
+        const isOneToOneCall = call?.callMode === "one-to-one";
+        const isActiveCall = call?.status === "active" || call?.status === "initiated";
+
+        if (call && isOneToOneCall && isActiveCall) {
+          await callRepo.updateCallStatus(roomName, "ended");
+          await endLiveKitRoom(call.roomId || roomName);
+          console.log(`One-to-one call ${roomName} ended because a participant left.`);
         }
       }
     }

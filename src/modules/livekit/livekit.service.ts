@@ -19,7 +19,7 @@ export async function startRoomRecording(roomName: string, fileOutput: { filepat
   // options: { layout, audioOnly, videoOnly, encodingOptions, ... }
   return await egressClient.startRoomCompositeEgress(
     roomName,
-    fileOutput,
+    fileOutput as any,
     options || {}
   );
 }
@@ -27,6 +27,14 @@ export async function startRoomRecording(roomName: string, fileOutput: { filepat
 // Stop a recording by egressId
 export async function stopRecording(egressId: string) {
   return await egressClient.stopEgress(egressId);
+}
+
+export async function endLiveKitRoom(roomName: string): Promise<void> {
+  try {
+    await roomService.deleteRoom(roomName);
+  } catch (error) {
+    console.warn(`LiveKit room "${roomName}" could not be deleted.`, error);
+  }
 }
 
 export async function createLiveKitToken(identity: string, roomName: string) {
