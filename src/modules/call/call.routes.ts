@@ -4,10 +4,13 @@ import { createLiveKitToken, endLiveKitRoom, getLiveKitBaseUrl, startRoomRecordi
 import { CallRepository } from "./call.repository.js";
 import { CallStateMachine } from "./call.state-machine.js";
 import { authenticate } from "../../shared/middleware/auth.middleware.js";
+import { emitToUser } from "../realtime/realtime.service.js";
+import { UserRepository } from "../user/user.repository.js";
 import config from "../../config/index.js";
 
 const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   const callRepo = new CallRepository();
+  const userRepo = new UserRepository();
 
   // List endpoint for testing in postman
   app.get("/", async (request, reply) => {
@@ -22,6 +25,40 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       ],
       message: "Call routes are active"
     };
+  });
+
+  // Recent call history for the authenticated user
+  app.get("/history", { preHandler: authenticate }, async (request, reply) => {
+    const userId = request.user!.userId;
+    const query = request.query as { limit?: string };
+    const limit = Math.min(100, Math.max(1, parseInt(query.limit ?? "20", 10) || 20));
+
+    const calls = await callRepo.getCallHistoryForUser(userId, limit);
+
+    return reply.send({
+      calls: calls.map((call) => {
+        let durationSeconds: number | undefined;
+        if (call.startedAt && call.endedAt) {
+          durationSeconds = Math.max(
+            0,
+            Math.round((call.endedAt.getTime() - call.startedAt.getTime()) / 1000)
+          );
+        }
+
+        return {
+          id: call._id.toString(),
+          callerId: call.callerId,
+          calleeId: call.calleeId,
+          receiverIds: call.receiverIds,
+          callType: call.callType,
+          status: call.status,
+          durationSeconds,
+          createdAt: call.createdAt?.toISOString(),
+          startedAt: call.startedAt?.toISOString(),
+          endedAt: call.endedAt?.toISOString(),
+        };
+      }),
+    });
   });
 
   // Initiate a new call
@@ -64,6 +101,21 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
     // Generate token for the caller
     const token = await createLiveKitToken(callerId, roomId);
+
+    // Notify all receivers in real time so they see an incoming call popup
+    const caller = await userRepo.getUserById(callerId);
+    const callId = callRecord._id.toString();
+    for (const receiverId of receiverIds) {
+      emitToUser(receiverId, "call:incoming", {
+        callId,
+        callerId,
+        callerName: caller?.displayName ?? "Unknown",
+        callerAvatar: caller?.avatarUrl ?? null,
+        callType: callRecord.callType,
+        callMode: callRecord.callMode,
+        roomId,
+      });
+    }
 
     return reply.status(201).send({
       message: "Call initiated successfully",
@@ -128,6 +180,20 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     // Generate token for the callee
     const token = await createLiveKitToken(calleeId, roomId);
 
+    // Notify the caller that the call was accepted
+    emitToUser(callRecord.callerId, "call:accepted", {
+      callId: id,
+      calleeId,
+      roomId,
+    });
+
+    // Stop ringing on other receivers (conference) since the call is now active
+    for (const otherReceiverId of callRecord.receiverIds) {
+      if (otherReceiverId !== calleeId) {
+        emitToUser(otherReceiverId, "call:cancelled", { callId: id });
+      }
+    }
+
     return reply.send({
       message: "Call accepted successfully",
       call: callRecord,
@@ -162,6 +228,11 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     }
 
     await callRepo.updateCallStatus(id, "rejected");
+
+    emitToUser(callRecord.callerId, "call:rejected", {
+      callId: id,
+      calleeId,
+    });
 
     return reply.send({ message: "Call rejected successfully" });
   });
@@ -198,6 +269,13 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
     await callRepo.updateCallStatus(id, "ended");
     await endLiveKitRoom(callRecord.roomId || id);
+
+    // Notify all other participants that the call has ended
+    const participantIds = new Set([callRecord.callerId, ...callRecord.receiverIds]);
+    participantIds.delete(userId);
+    for (const participantId of participantIds) {
+      emitToUser(participantId, "call:ended", { callId: id });
+    }
 
     return reply.send({ message: "Call ended successfully" });
   });

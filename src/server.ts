@@ -2,6 +2,7 @@ import { buildApp } from "./app.js";
 import config from "./config/index.js";
 import { connectMongo } from "./shared/db/mongo.client.js";
 import { connectRedis } from "./shared/db/redis.client.js";
+import { initRealtime } from "./modules/realtime/realtime.service.js";
 
 export async function startServer() {
   const app = await buildApp();
@@ -10,6 +11,9 @@ export async function startServer() {
     // Initialize database connections
     await connectMongo();
     const redis = connectRedis();
+
+    // Initialize Socket.IO for real-time call signaling & presence
+    initRealtime(app.server);
 
     await app.listen({ port: config.port, host: "0.0.0.0" });
     

@@ -32,6 +32,11 @@ export const userSchema = z.object({
   createdAt: z.date().default(() => new Date()),
   updatedAt: z.date().default(() => new Date()),
   lastSeenAt: z.date().default(() => new Date()),
+  isBlocked: z.boolean().default(false),
+  presenceStatus: z.enum(["online", "away", "busy", "oncall", "offline"]).default("offline"),
+  designation: z.string().optional(),
+  department: z.string().optional(),
+  extensionNumber: z.string().optional(),
 });
 
 export type User = z.infer<typeof userSchema>;

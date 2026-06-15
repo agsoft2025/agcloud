@@ -7,6 +7,7 @@ import crypto from "crypto";
 import config from "../../config/index.js";
 import { z } from "zod";
 import { connectMongo } from "../../shared/db/mongo.client.js";
+import { ObjectId } from "mongodb";
 
 const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   const db = await connectMongo();
@@ -67,6 +68,53 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
           errors: error.issues,
         });
       }
+      console.error(error);
+      return reply.status(500).send({ message: "Internal server error" });
+    }
+  });
+
+  // POST /auth/refresh  Issue a new access token from the existing session
+  app.post("/refresh", async (request, reply) => {
+    try {
+      const body = (request.body ?? {}) as { refreshToken?: string };
+      const existingToken = body.refreshToken ?? request.cookies.token;
+
+      if (!existingToken) {
+        return reply.status(401).send({ message: "Authentication required" });
+      }
+
+      let decoded: { userId: string; email: string };
+      try {
+        decoded = jwt.verify(existingToken, config.jwtSecret, { ignoreExpiration: true }) as {
+          userId: string;
+          email: string;
+        };
+      } catch {
+        return reply.status(401).send({ message: "Invalid or expired token" });
+      }
+
+      const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
+
+      if (!user || user.status === "suspended" || user.status === "deleted") {
+        return reply.status(401).send({ message: "Invalid or expired token" });
+      }
+
+      const token = jwt.sign(
+        { userId: user._id.toString(), email: user.email },
+        config.jwtSecret,
+        { expiresIn: config.jwtAccessTokenExpiresIn as any }
+      );
+
+      reply.setCookie("token", token, {
+        path: "/",
+        httpOnly: true,
+        secure: config.env === "production",
+        sameSite: "strict",
+        maxAge: 7 * 24 * 60 * 60, // 7 days
+      });
+
+      return reply.send({ accessToken: token, token });
+    } catch (error: any) {
       console.error(error);
       return reply.status(500).send({ message: "Internal server error" });
     }

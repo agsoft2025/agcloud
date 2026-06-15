@@ -81,6 +81,21 @@ export class CallRepository {
     }
   }
 
+  async getCallHistoryForUser(userId: string, limit = 20): Promise<CallDocument[]> {
+    const collection = await this.getCollection();
+    return await collection
+      .find({
+        $or: [
+          { callerId: userId },
+          { calleeId: userId },
+          { receiverIds: userId },
+        ],
+      })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .toArray();
+  }
+
   async getActiveCallForUser(userId: string): Promise<CallDocument | null> {
     const collection = await this.getCollection();
     return await collection.findOne({
