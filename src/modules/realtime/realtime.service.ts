@@ -4,11 +4,13 @@ import jwt from "jsonwebtoken";
 import config from "../../config/index.js";
 import { UserPayload } from "../../shared/middleware/auth.middleware.js";
 import { UserRepository } from "../user/user.repository.js";
+import { CallRepository } from "../call/call.repository.js";
 
 let io: SocketIOServer | null = null;
 
 const userSockets = new Map<string, Set<string>>();
 const userRepo = new UserRepository();
+const callRepo = new CallRepository();
 
 export function initRealtime(httpServer: HttpServer): SocketIOServer {
   io = new SocketIOServer(httpServer, {
@@ -50,6 +52,29 @@ export function initRealtime(httpServer: HttpServer): SocketIOServer {
     if (wasOffline) {
       void userRepo.setPresence(userId, "online");
       io!.emit("presence:update", { userId, status: "online" });
+
+      // Re-notify the user of any calls they missed while offline.
+      void (async () => {
+        try {
+          const pendingCalls = await callRepo.getActivePendingCallsForUser(userId);
+          for (const call of pendingCalls) {
+            const callId = call._id.toString();
+            const caller = await userRepo.getUserById(call.callerId);
+            emitToUser(userId, "call:incoming", {
+              callId,
+              callerId: call.callerId,
+              callerName: caller?.displayName ?? caller?.email ?? "Unknown",
+              callerAvatar: caller?.avatarUrl ?? null,
+              callType: call.callType,
+              callMode: call.callMode,
+              roomId: call.roomId ?? callId,
+              reinvite: true,
+            });
+          }
+        } catch (err) {
+          console.error("[realtime] failed to re-notify pending calls for", userId, err);
+        }
+      })();
     }
 
     socket.on("disconnect", () => {

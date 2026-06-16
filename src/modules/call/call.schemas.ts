@@ -6,9 +6,29 @@ export const callStatusSchema = z.enum([
   "active",
   "rejected",
   "ended",
+  "missed",
 ]);
 
 export type CallStatus = z.infer<typeof callStatusSchema>;
+
+export const participantStatusSchema = z.enum([
+  "invited",
+  "joined",
+  "rejected",
+  "left",
+  "missed",
+]);
+
+export type ParticipantStatus = z.infer<typeof participantStatusSchema>;
+
+export const callParticipantSchema = z.object({
+  status: participantStatusSchema,
+  invitedAt: z.date(),
+  invitedBy: z.string().optional(),
+  respondedAt: z.date().optional(),
+});
+
+export type CallParticipant = z.infer<typeof callParticipantSchema>;
 
 export const callSchema = z.object({
   callerId: z.string(), // User ID of caller (string representation of ObjectId)
@@ -19,6 +39,10 @@ export const callSchema = z.object({
   status: callStatusSchema.default("initiated"),
   callType: z.enum(["audio", "video"]).default("video"),
   recording: z.boolean().default(false), // Call recording active status
+  // Per-receiver invitation status, keyed by userId. Tracks invite/re-invite
+  // lifecycle independently from the overall call status so users can be
+  // re-invited after a missed/rejected invitation while the call is ongoing.
+  participants: z.record(z.string(), callParticipantSchema).default({}),
   createdAt: z.date().default(() => new Date()),
   startedAt: z.date().optional(), // When call was accepted
   endedAt: z.date().optional(), // When call was hung up / ended
@@ -43,3 +67,9 @@ export const initCallSchema = z.object({
 });
 
 export type InitCallInput = z.infer<typeof initCallSchema>;
+
+export const addParticipantSchema = z.object({
+  userId: z.string(),
+});
+
+export type AddParticipantInput = z.infer<typeof addParticipantSchema>;

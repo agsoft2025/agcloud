@@ -1,6 +1,6 @@
 import { ObjectId } from "mongodb";
 import { connectMongo } from "../../shared/db/mongo.client.js";
-import { CallDocument, Call, CallStatus } from "./call.schemas.js";
+import { CallDocument, Call, CallStatus, CallParticipant, ParticipantStatus } from "./call.schemas.js";
 
 export class CallRepository {
   private async getCollection() {
@@ -18,6 +18,12 @@ export class CallRepository {
     const collection = await this.getCollection();
     const calleeId = receiverIds[0] || "";
 
+    const now = new Date();
+    const participants: Record<string, CallParticipant> = {};
+    for (const receiverId of receiverIds) {
+      participants[receiverId] = { status: "invited", invitedAt: now, invitedBy: callerId };
+    }
+
     const newCall: Call = {
       callerId,
       calleeId,
@@ -26,7 +32,8 @@ export class CallRepository {
       status: "initiated",
       callType,
       recording,
-      createdAt: new Date(),
+      participants,
+      createdAt: now,
     };
 
     const result = await collection.insertOne(newCall as CallDocument);
@@ -96,6 +103,93 @@ export class CallRepository {
       .toArray();
   }
 
+  async addParticipant(callId: string, userId: string): Promise<CallDocument | null> {
+    const collection = await this.getCollection();
+    try {
+      await collection.updateOne(
+        { _id: new ObjectId(callId) },
+        {
+          $addToSet: { receiverIds: userId },
+          $set: { callMode: "conference" },
+        }
+      );
+      return await collection.findOne({ _id: new ObjectId(callId) });
+    } catch (error) {
+      console.error(`Error in addParticipant for call "${callId}":`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Invite (or re-invite) a user to a call. Adds them to receiverIds if
+   * needed and (re)sets their participant entry to "invited" so a
+   * previously missed/rejected/left user can receive a fresh invitation.
+   */
+  async inviteParticipant(callId: string, userId: string, invitedBy: string): Promise<CallDocument | null> {
+    const collection = await this.getCollection();
+    try {
+      await collection.updateOne(
+        { _id: new ObjectId(callId) },
+        {
+          $addToSet: { receiverIds: userId },
+          $set: {
+            callMode: "conference",
+            [`participants.${userId}`]: {
+              status: "invited",
+              invitedAt: new Date(),
+              invitedBy,
+            },
+          },
+        }
+      );
+      return await collection.findOne({ _id: new ObjectId(callId) });
+    } catch (error) {
+      console.error(`Error in inviteParticipant for call "${callId}":`, error);
+      return null;
+    }
+  }
+
+  async setParticipantStatus(callId: string, userId: string, status: ParticipantStatus): Promise<boolean> {
+    const collection = await this.getCollection();
+    try {
+      const result = await collection.updateOne(
+        { _id: new ObjectId(callId) },
+        {
+          $set: {
+            [`participants.${userId}.status`]: status,
+            [`participants.${userId}.respondedAt`]: new Date(),
+          },
+        }
+      );
+      return result.modifiedCount > 0;
+    } catch (error) {
+      console.error(`Error in setParticipantStatus for call "${callId}":`, error);
+      return false;
+    }
+  }
+
+  /** Mark every participant still in "invited" status as "missed" (e.g. when the call ends). */
+  async markPendingParticipantsAsMissed(callId: string): Promise<void> {
+    const collection = await this.getCollection();
+    const call = await collection.findOne({ _id: new ObjectId(callId) });
+    if (!call?.participants) return;
+
+    const updates: Record<string, ParticipantStatus> = {};
+    for (const [userId, participant] of Object.entries(call.participants)) {
+      if (participant.status === "invited") {
+        updates[`participants.${userId}.status`] = "missed";
+      }
+    }
+
+    if (Object.keys(updates).length === 0) return;
+
+    try {
+      await collection.updateOne({ _id: new ObjectId(callId) }, { $set: updates });
+    } catch (error) {
+      console.error(`Error in markPendingParticipantsAsMissed for call "${callId}":`, error);
+    }
+  }
+
   async getActiveCallForUser(userId: string): Promise<CallDocument | null> {
     const collection = await this.getCollection();
     return await collection.findOne({
@@ -106,5 +200,18 @@ export class CallRepository {
       ],
       status: { $in: ["initiated", "active"] },
     });
+  }
+
+  /** Returns calls that are still active/initiated where this user was invited
+   *  but hasn't yet joined — used to re-notify users who come back online. */
+  async getActivePendingCallsForUser(userId: string): Promise<CallDocument[]> {
+    const collection = await this.getCollection();
+    return await collection
+      .find({
+        receiverIds: userId,
+        status: { $in: ["initiated", "active"] },
+        [`participants.${userId}.status`]: { $in: ["invited", "missed"] },
+      })
+      .toArray();
   }
 }

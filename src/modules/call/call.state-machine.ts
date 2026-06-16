@@ -1,10 +1,11 @@
 import { CallStatus } from "./call.schemas.js";
 
 const VALID_TRANSITIONS: Record<CallStatus, CallStatus[]> = {
-  initiated: ["active", "rejected", "ended"],
+  initiated: ["active", "rejected", "ended", "missed"],
   active: ["ended"],
   rejected: [],
   ended: [],
+  missed: [],
 };
 
 export class CallStateMachine {

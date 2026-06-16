@@ -1,5 +1,5 @@
 import { FastifyInstance, FastifyPluginAsync } from "fastify";
-import { initCallSchema } from "./call.schemas.js";
+import { initCallSchema, addParticipantSchema } from "./call.schemas.js";
 import { createLiveKitToken, endLiveKitRoom, getLiveKitBaseUrl, startRoomRecording, stopRecording } from "../livekit/livekit.service.js";
 import { CallRepository } from "./call.repository.js";
 import { CallStateMachine } from "./call.state-machine.js";
@@ -45,13 +45,24 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
           );
         }
 
+        const joinedCount = Object.values(call.participants ?? {}).filter(
+          (p) => p.status === "joined"
+        ).length;
+        const participantCount =
+          call.status === "active" || call.status === "initiated" ? joinedCount + 1 : joinedCount;
+
         return {
           id: call._id.toString(),
           callerId: call.callerId,
           calleeId: call.calleeId,
           receiverIds: call.receiverIds,
           callType: call.callType,
+          callMode: call.callMode,
           status: call.status,
+          // The current user's own invitation status for this call (undefined for the caller)
+          participantStatus: call.participants?.[userId]?.status,
+          isActive: call.status === "active",
+          participantCount,
           durationSeconds,
           createdAt: call.createdAt?.toISOString(),
           startedAt: call.startedAt?.toISOString(),
@@ -114,6 +125,7 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         callType: callRecord.callType,
         callMode: callRecord.callMode,
         roomId,
+        reinvite: false,
       });
     }
 
@@ -124,6 +136,81 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       roomName: roomId,
       url: getLiveKitBaseUrl()
     });
+  });
+
+  // Add a participant to an ongoing call (converts it into a conference)
+  app.post("/:id/add-participant", { preHandler: authenticate }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const userId = request.user!.userId;
+    const body = addParticipantSchema.parse(request.body);
+    const targetUserId = body.userId;
+
+    const callRecord = await callRepo.getCallById(id);
+    if (!callRecord) {
+      return reply.status(404).send({ message: "Call not found" });
+    }
+
+    const isAuthorized = callRecord.callerId === userId || callRecord.receiverIds.includes(userId);
+    if (!isAuthorized) {
+      return reply.status(403).send({ message: "You are not authorized to modify this call" });
+    }
+
+    if (callRecord.status !== "initiated" && callRecord.status !== "active") {
+      return reply.status(400).send({ message: `Cannot add participants to a call with status '${callRecord.status}'` });
+    }
+
+    if (targetUserId === callRecord.callerId) {
+      return reply.status(400).send({ message: "User is already a participant in this call" });
+    }
+
+    const existingParticipant = callRecord.participants?.[targetUserId];
+    if (existingParticipant?.status === "joined") {
+      return reply.status(400).send({ message: "User is already in this call" });
+    }
+
+    // Re-invite: the user was previously invited (and missed/rejected/left) or
+    // already has a pending invite that can be refreshed.
+    const isReinvite = Boolean(existingParticipant);
+
+    const targetUser = await userRepo.getUserById(targetUserId);
+    if (!targetUser) {
+      return reply.status(404).send({ message: "User not found" });
+    }
+
+    const updatedCall = await callRepo.inviteParticipant(id, targetUserId, userId);
+    if (!updatedCall) {
+      return reply.status(500).send({ message: "Unable to add participant" });
+    }
+
+    const roomId = updatedCall.roomId || id;
+    const caller = await userRepo.getUserById(callRecord.callerId);
+
+    // Notify the (re-)invited participant with an incoming call popup
+    emitToUser(targetUserId, "call:incoming", {
+      callId: id,
+      callerId: callRecord.callerId,
+      callerName: caller?.displayName ?? "Unknown",
+      callerAvatar: caller?.avatarUrl ?? null,
+      callType: updatedCall.callType,
+      callMode: updatedCall.callMode,
+      roomId,
+      reinvite: isReinvite,
+    });
+
+    // Notify other existing participants that someone is (re-)joining
+    const existingParticipantIds = new Set([callRecord.callerId, ...callRecord.receiverIds]);
+    existingParticipantIds.delete(userId);
+    existingParticipantIds.delete(targetUserId);
+    for (const participantId of existingParticipantIds) {
+      emitToUser(participantId, "call:participant-added", {
+        callId: id,
+        userId: targetUserId,
+        displayName: targetUser.displayName ?? "Unknown",
+        reinvite: isReinvite,
+      });
+    }
+
+    return reply.send({ message: "Participant added successfully", call: updatedCall });
   });
 
   app.get("/:id", { preHandler: authenticate }, async (request, reply) => {
@@ -165,20 +252,28 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       return reply.status(403).send({ message: "You are not authorized to accept this call" });
     }
 
-    if (!CallStateMachine.isValidTransition(callRecord.status, "active")) {
-      return reply.status(400).send({
-        message: `Cannot transition call from '${callRecord.status}' to 'active'`
-      });
+    if (callRecord.status !== "active") {
+      if (!CallStateMachine.isValidTransition(callRecord.status, "active")) {
+        return reply.status(400).send({
+          message: `Cannot transition call from '${callRecord.status}' to 'active'`
+        });
+      }
+
+      // Update status to active
+      await callRepo.updateCallStatus(id, "active");
+      callRecord.status = "active";
     }
 
-    // Update status to active
-    await callRepo.updateCallStatus(id, "active");
-    callRecord.status = "active";
+    // Mark this participant as joined (works for first-time accepts, re-invites,
+    // and users joining an already-active call they previously missed/rejected/left).
+    await callRepo.setParticipantStatus(id, calleeId, "joined");
 
     const roomId = callRecord.roomId || id;
 
     // Generate token for the callee
     const token = await createLiveKitToken(calleeId, roomId);
+
+    const acceptingUser = await userRepo.getUserById(calleeId);
 
     // Notify the caller that the call was accepted
     emitToUser(callRecord.callerId, "call:accepted", {
@@ -187,10 +282,25 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       roomId,
     });
 
-    // Stop ringing on other receivers (conference) since the call is now active
-    for (const otherReceiverId of callRecord.receiverIds) {
-      if (otherReceiverId !== calleeId) {
-        emitToUser(otherReceiverId, "call:cancelled", { callId: id });
+    // Notify everyone else that this participant joined the ongoing call
+    const otherParticipantIds = new Set([callRecord.callerId, ...callRecord.receiverIds]);
+    otherParticipantIds.delete(calleeId);
+    for (const participantId of otherParticipantIds) {
+      emitToUser(participantId, "call:participant-joined", {
+        callId: id,
+        userId: calleeId,
+        displayName: acceptingUser?.displayName ?? "Unknown",
+      });
+    }
+
+    // For one-to-one calls, stop ringing on the (single) other receiver entry
+    // since the call is now active. Conference invitations are independent per
+    // participant, so other pending invites are left untouched.
+    if (callRecord.callMode === "one-to-one") {
+      for (const otherReceiverId of callRecord.receiverIds) {
+        if (otherReceiverId !== calleeId) {
+          emitToUser(otherReceiverId, "call:cancelled", { callId: id });
+        }
       }
     }
 
@@ -221,6 +331,24 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       return reply.status(403).send({ message: "You are not authorized to reject this call" });
     }
 
+    if (callRecord.callMode === "conference") {
+      // In a conference, one participant declining doesn't end the call for
+      // everyone else — just record their own status so they can be
+      // re-invited later, and let the caller/other participants know.
+      await callRepo.setParticipantStatus(id, calleeId, "rejected");
+
+      const otherParticipantIds = new Set([callRecord.callerId, ...callRecord.receiverIds]);
+      otherParticipantIds.delete(calleeId);
+      for (const participantId of otherParticipantIds) {
+        emitToUser(participantId, "call:participant-rejected", {
+          callId: id,
+          userId: calleeId,
+        });
+      }
+
+      return reply.send({ message: "Call rejected successfully" });
+    }
+
     if (!CallStateMachine.isValidTransition(callRecord.status, "rejected")) {
       return reply.status(400).send({
         message: `Cannot transition call from '${callRecord.status}' to 'rejected'`
@@ -228,6 +356,7 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     }
 
     await callRepo.updateCallStatus(id, "rejected");
+    await callRepo.setParticipantStatus(id, calleeId, "rejected");
 
     emitToUser(callRecord.callerId, "call:rejected", {
       callId: id,
@@ -268,9 +397,11 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     }
 
     await callRepo.updateCallStatus(id, "ended");
+    await callRepo.markPendingParticipantsAsMissed(id);
     await endLiveKitRoom(callRecord.roomId || id);
 
-    // Notify all other participants that the call has ended
+    // Notify all other participants that the call has ended (this also clears
+    // any pending invitations they may still be showing for this call).
     const participantIds = new Set([callRecord.callerId, ...callRecord.receiverIds]);
     participantIds.delete(userId);
     for (const participantId of participantIds) {
