@@ -1,4 +1,4 @@
-import { FastifyInstance, FastifyPluginAsync } from "fastify";
+import { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastify";
 import { registerSchema, loginSchema, forgotPasswordSchema, resetPasswordSchema } from "./auth.schemas.js";
 import { userSchema, UserDocument } from "../user/user.schemas.js";
 import bcrypt from "bcrypt";
@@ -8,12 +8,67 @@ import config from "../../config/index.js";
 import { z } from "zod";
 import { connectMongo } from "../../shared/db/mongo.client.js";
 import { ObjectId } from "mongodb";
+import { authenticate } from "../../shared/middleware/auth.middleware.js";
+
+/**
+ * Derive cookie attributes from the incoming request protocol.
+ *
+ * HTTPS (dev tunnel or production):
+ *   secure: true  — required for SameSite=None
+ *   sameSite: "none" — allows cross-origin cookies (frontend/backend on different
+ *                       subdomains, e.g. *.inc1.devtunnels.ms)
+ *
+ * HTTP (plain local development, same-site localhost):
+ *   secure: false
+ *   sameSite: "lax"  — safe for same-site localhost regardless of port
+ */
+function cookieOptions(request: FastifyRequest) {
+  const isHttps =
+    request.protocol === "https" ||
+    request.headers["x-forwarded-proto"] === "https" ||
+    config.env === "production";
+
+  return {
+    path: "/",
+    httpOnly: true,
+    secure: isHttps,
+    sameSite: isHttps ? ("none" as const) : ("lax" as const),
+    maxAge: 7 * 24 * 60 * 60, // 7 days
+  };
+}
 
 const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   const db = await connectMongo();
   const usersCollection = db.collection<UserDocument>("users");
 
-  //  POST  /auth/signin` | Authenticate, return tokens and set cookies
+  // GET /auth/me  Return the currently authenticated user (reads the session cookie)
+  app.get("/me", { preHandler: authenticate }, async (request, reply) => {
+    try {
+      const user = await usersCollection.findOne(
+        { _id: new ObjectId(request.user!.userId) },
+        { projection: { passwordHash: 0, resetPasswordToken: 0, resetPasswordExpires: 0 } }
+      );
+
+      if (!user || user.status === "suspended" || user.status === "deleted") {
+        reply.clearCookie("token", cookieOptions(request));
+        return reply.status(401).send({ message: "Authentication required" });
+      }
+
+      return reply.send({
+        id: user._id,
+        email: user.email,
+        role: user.role,
+        status: user.status,
+        displayName: user.displayName,
+        avatarUrl: user.avatarUrl ?? null,
+      });
+    } catch (error) {
+      console.error(error);
+      return reply.status(500).send({ message: "Internal server error" });
+    }
+  });
+
+  // POST /auth/signin  Authenticate, set session cookie
   app.post("/signin", async (request, reply) => {
     try {
       const body = loginSchema.parse(request.body);
@@ -36,13 +91,7 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         { expiresIn: config.jwtAccessTokenExpiresIn as any }
       );
 
-      reply.setCookie("token", token, {
-        path: "/",
-        httpOnly: true,
-        secure: config.env === "production",
-        sameSite: "strict",
-        maxAge: 7 * 24 * 60 * 60, // 7 days
-      });
+      reply.setCookie("token", token, cookieOptions(request));
 
       const responsePayload: any = {
         message: "Login successful",
@@ -73,7 +122,7 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     }
   });
 
-  // POST /auth/refresh  Issue a new access token from the existing session
+  // POST /auth/refresh  Issue a new session cookie from the existing one
   app.post("/refresh", async (request, reply) => {
     try {
       const body = (request.body ?? {}) as { refreshToken?: string };
@@ -105,13 +154,7 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         { expiresIn: config.jwtAccessTokenExpiresIn as any }
       );
 
-      reply.setCookie("token", token, {
-        path: "/",
-        httpOnly: true,
-        secure: config.env === "production",
-        sameSite: "strict",
-        maxAge: 7 * 24 * 60 * 60, // 7 days
-      });
+      reply.setCookie("token", token, cookieOptions(request));
 
       return reply.send({ accessToken: token, token });
     } catch (error: any) {
@@ -120,31 +163,25 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     }
   });
 
-  // POST /auth/signout  Revoke refresh token  Clear cookies
+  // POST /auth/signout  Clear session cookie
   app.post("/signout", async (request, reply) => {
-    reply.clearCookie("token", { path: "/" });
+    reply.clearCookie("token", cookieOptions(request));
     return reply.send({ message: "Logout successful" });
   });
 
-  //  POST  auth/signup Register new user
+  // POST /auth/signup  Register new user
   app.post("/signup", async (request, reply) => {
     try {
-      // Validate request body
       const body = registerSchema.parse(request.body);
-      console.log("<><>body", body)
-      // Check existing user
+
       const existingUser = await usersCollection.findOne({ email: body.email });
-      console.log("<><>existingUser", existingUser)
+
       if (existingUser) {
-        return reply.status(409).send({
-          message: "User already exists",
-        });
+        return reply.status(409).send({ message: "User already exists" });
       }
 
-      // Hash password
       const passwordHash = await bcrypt.hash(body.password, 10);
-      console.log("<><>passwordHash", passwordHash)
-      // Create user object
+
       const newUser = userSchema.parse({
         email: body.email,
         passwordHash,
@@ -153,10 +190,8 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         phoneNumber: body.phoneNumber,
       });
 
-      // Insert into DB using the typed collection
       const result = await usersCollection.insertOne(newUser as UserDocument);
-      console.log("<><>result", result)
-      // Return response
+
       return reply.status(201).send({
         message: "User registered successfully",
         user: {
@@ -172,16 +207,12 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
           errors: error.issues,
         });
       }
-
       console.error(error);
-
-      return reply.status(500).send({
-        message: "Internal server error",
-      });
+      return reply.status(500).send({ message: "Internal server error" });
     }
   });
 
-  //  POST /auth/forgot-password  Send reset email 
+  // POST /auth/forgot-password  Send reset email
   app.post("/forgot-password", async (request, reply) => {
     try {
       const { email } = forgotPasswordSchema.parse(request.body);
@@ -199,8 +230,8 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
           {
             $set: {
               resetPasswordToken: resetTokenHash,
-              resetPasswordExpires: expires
-            }
+              resetPasswordExpires: expires,
+            },
           }
         );
 
@@ -219,7 +250,7 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     }
   });
 
-  //  POST /auth/reset-password Set new password with reset token 
+  // POST /auth/reset-password  Set new password with reset token
   app.post("/reset-password", async (request, reply) => {
     try {
       const { token, newPassword } = resetPasswordSchema.parse(request.body);
@@ -228,7 +259,7 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
       const user = await usersCollection.findOne({
         resetPasswordToken: resetTokenHash,
-        resetPasswordExpires: { $gt: new Date() }
+        resetPasswordExpires: { $gt: new Date() },
       });
 
       if (!user) {
@@ -241,7 +272,7 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         { _id: user._id },
         {
           $set: { passwordHash },
-          $unset: { resetPasswordToken: "", resetPasswordExpires: "" }
+          $unset: { resetPasswordToken: "", resetPasswordExpires: "" },
         }
       );
 
