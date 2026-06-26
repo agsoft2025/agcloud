@@ -2,6 +2,9 @@ import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { UserRepository } from "./user.repository.js";
 import { UserDocument } from "./user.schemas.js";
 import { authenticate } from "../../shared/middleware/auth.middleware.js";
+import { ObjectId } from "mongodb";
+import { connectMongo } from "../../shared/db/mongo.client.js";
+import { z } from "zod";
 
 function toContact(user: UserDocument) {
   return {
@@ -20,8 +23,20 @@ function toContact(user: UserDocument) {
   };
 }
 
+const updateProfileSchema = z.object({
+  displayName: z
+    .string()
+    .min(2, "Display name must be at least 2 characters")
+    .max(50, "Display name must be at most 50 characters")
+    .optional(),
+  // Accepts regular URLs and data URLs (base64-encoded avatars)
+  avatarUrl: z.string().optional(),
+});
+
 const userRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   const userRepo = new UserRepository();
+  const db = await connectMongo();
+  const usersCollection = db.collection<UserDocument>("users");
 
   // GET /users - list active, non-blocked users with search & pagination
   app.get("/", { preHandler: authenticate }, async (request, reply) => {
@@ -55,6 +70,45 @@ const userRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         lastSeen: p.lastSeen,
       }))
     );
+  });
+
+  // PUT /users/me - update the authenticated user's own profile
+  app.put("/me", { preHandler: authenticate }, async (request, reply) => {
+    try {
+      const body = updateProfileSchema.parse(request.body);
+
+      const updates: Record<string, unknown> = { updatedAt: new Date() };
+      if (body.displayName !== undefined) updates.displayName = body.displayName;
+      if (body.avatarUrl !== undefined) updates.avatarUrl = body.avatarUrl;
+
+      const result = await usersCollection.findOneAndUpdate(
+        { _id: new ObjectId(request.user!.userId) },
+        { $set: updates },
+        {
+          returnDocument: "after",
+          projection: { passwordHash: 0, resetPasswordToken: 0, resetPasswordExpires: 0 },
+        }
+      );
+
+      if (!result) {
+        return reply.status(404).send({ message: "User not found" });
+      }
+
+      return reply.send({
+        id: result._id,
+        email: result.email,
+        role: result.role,
+        status: result.status,
+        displayName: result.displayName,
+        avatarUrl: result.avatarUrl ?? null,
+      });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return reply.status(400).send({ message: "Validation failed", errors: error.issues });
+      }
+      console.error(error);
+      return reply.status(500).send({ message: "Internal server error" });
+    }
   });
 
   // GET /users/:id - fetch a single user profile
