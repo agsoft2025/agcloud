@@ -92,4 +92,34 @@ export class UserRepository {
       return null;
     }
   }
+
+  /**
+   * Persists presence state to the database.
+   * Called by the presence worker (every 5 min) and immediately on OFFLINE transition.
+   * Maps uppercase Redis status (ONLINE|AWAY|OFFLINE) to lowercase DB enum values.
+   * Only writes status, lastSeen, and updatedAt -- never heartbeat or activity timestamps.
+   */
+  async syncPresenceToDb(
+    userId: string,
+    status: "ONLINE" | "AWAY" | "OFFLINE",
+    lastSeen?: Date
+  ): Promise<void> {
+    const collection = await this.getCollection();
+    try {
+      const dbStatus = status.toLowerCase() as UserDocument["presenceStatus"];
+      const update: Record<string, unknown> = {
+        presenceStatus: dbStatus,
+        updatedAt: new Date(),
+      };
+      if (lastSeen) {
+        update.lastSeenAt = lastSeen;
+      }
+      await collection.updateOne(
+        { _id: new ObjectId(userId) },
+        { $set: update }
+      );
+    } catch {
+      // Ignore invalid ObjectId or DB errors -- Redis remains authoritative
+    }
+  }
 }

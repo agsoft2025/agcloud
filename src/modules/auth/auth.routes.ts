@@ -9,19 +9,8 @@ import { z } from "zod";
 import { connectMongo } from "../../shared/db/mongo.client.js";
 import { ObjectId } from "mongodb";
 import { authenticate } from "../../shared/middleware/auth.middleware.js";
+import { handleActivity } from "../presence/presence.service.js";
 
-/**
- * Derive cookie attributes from the incoming request protocol.
- *
- * HTTPS (dev tunnel or production):
- *   secure: true  — required for SameSite=None
- *   sameSite: "none" — allows cross-origin cookies (frontend/backend on different
- *                       subdomains, e.g. *.inc1.devtunnels.ms)
- *
- * HTTP (plain local development, same-site localhost):
- *   secure: false
- *   sameSite: "lax"  — safe for same-site localhost regardless of port
- */
 function cookieOptions(request: FastifyRequest) {
   const isHttps =
     request.protocol === "https" ||
@@ -33,7 +22,7 @@ function cookieOptions(request: FastifyRequest) {
     httpOnly: true,
     secure: isHttps,
     sameSite: isHttps ? ("none" as const) : ("lax" as const),
-    maxAge: 7 * 24 * 60 * 60, // 7 days
+    maxAge: 7 * 24 * 60 * 60,
   };
 }
 
@@ -41,7 +30,7 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   const db = await connectMongo();
   const usersCollection = db.collection<UserDocument>("users");
 
-  // GET /auth/me  Return the currently authenticated user (reads the session cookie)
+  // GET /auth/me
   app.get("/me", { preHandler: authenticate }, async (request, reply) => {
     try {
       const user = await usersCollection.findOne(
@@ -53,6 +42,9 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         reply.clearCookie("token", cookieOptions(request));
         return reply.status(401).send({ message: "Authentication required" });
       }
+
+      // Update presence on every session resume (page reload, app open).
+      handleActivity(user._id.toString()).catch(() => {});
 
       return reply.send({
         id: user._id,
@@ -68,19 +60,17 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     }
   });
 
-  // POST /auth/signin  Authenticate, set session cookie
+  // POST /auth/signin
   app.post("/signin", async (request, reply) => {
     try {
       const body = loginSchema.parse(request.body);
 
       const user = await usersCollection.findOne({ email: body.email });
-
       if (!user) {
         return reply.status(401).send({ message: "Invalid email or password" });
       }
 
       const isPasswordValid = await bcrypt.compare(body.password, user.passwordHash);
-
       if (!isPasswordValid) {
         return reply.status(401).send({ message: "Invalid email or password" });
       }
@@ -92,6 +82,10 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       );
 
       reply.setCookie("token", token, cookieOptions(request));
+
+      // Create Redis presence immediately on login so other users see this user
+      // as ONLINE right away (not deferred until Socket.IO connection completes).
+      handleActivity(user._id.toString()).catch(() => {});
 
       const responsePayload: any = {
         message: "Login successful",
@@ -112,17 +106,14 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       return reply.send(responsePayload);
     } catch (error: any) {
       if (error instanceof z.ZodError) {
-        return reply.status(400).send({
-          message: "Validation failed",
-          errors: error.issues,
-        });
+        return reply.status(400).send({ message: "Validation failed", errors: error.issues });
       }
       console.error(error);
       return reply.status(500).send({ message: "Internal server error" });
     }
   });
 
-  // POST /auth/refresh  Issue a new session cookie from the existing one
+  // POST /auth/refresh
   app.post("/refresh", async (request, reply) => {
     try {
       const body = (request.body ?? {}) as { refreshToken?: string };
@@ -143,7 +134,6 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       }
 
       const user = await usersCollection.findOne({ _id: new ObjectId(decoded.userId) });
-
       if (!user || user.status === "suspended" || user.status === "deleted") {
         return reply.status(401).send({ message: "Invalid or expired token" });
       }
@@ -156,6 +146,9 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
       reply.setCookie("token", token, cookieOptions(request));
 
+      // Refresh = user is still active; update presence.
+      handleActivity(user._id.toString()).catch(() => {});
+
       return reply.send({ accessToken: token, token });
     } catch (error: any) {
       console.error(error);
@@ -163,19 +156,18 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     }
   });
 
-  // POST /auth/signout  Clear session cookie
+  // POST /auth/signout
   app.post("/signout", async (request, reply) => {
     reply.clearCookie("token", cookieOptions(request));
     return reply.send({ message: "Logout successful" });
   });
 
-  // POST /auth/signup  Register new user
+  // POST /auth/signup
   app.post("/signup", async (request, reply) => {
     try {
       const body = registerSchema.parse(request.body);
 
       const existingUser = await usersCollection.findOne({ email: body.email });
-
       if (existingUser) {
         return reply.status(409).send({ message: "User already exists" });
       }
@@ -202,21 +194,17 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       });
     } catch (error: any) {
       if (error instanceof z.ZodError) {
-        return reply.status(400).send({
-          message: "Validation failed",
-          errors: error.issues,
-        });
+        return reply.status(400).send({ message: "Validation failed", errors: error.issues });
       }
       console.error(error);
       return reply.status(500).send({ message: "Internal server error" });
     }
   });
 
-  // POST /auth/forgot-password  Send reset email
+  // POST /auth/forgot-password
   app.post("/forgot-password", async (request, reply) => {
     try {
       const { email } = forgotPasswordSchema.parse(request.body);
-
       const user = await usersCollection.findOne({ email });
 
       if (user) {
@@ -227,19 +215,12 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
         await usersCollection.updateOne(
           { _id: user._id },
-          {
-            $set: {
-              resetPasswordToken: resetTokenHash,
-              resetPasswordExpires: expires,
-            },
-          }
+          { $set: { resetPasswordToken: resetTokenHash, resetPasswordExpires: expires } }
         );
 
-        // TODO: Integrate email service here (e.g. SendGrid, AWS SES)
-        console.log(`[DEV ONLY] Reset token for ${email}: ${resetToken}`);
+        console.log("[DEV ONLY] Reset token for " + email + ": " + resetToken);
       }
 
-      // Always return success to prevent email enumeration
       return reply.send({ message: "If that email exists, a password reset link has been sent." });
     } catch (error: any) {
       if (error instanceof z.ZodError) {
@@ -250,7 +231,7 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     }
   });
 
-  // POST /auth/reset-password  Set new password with reset token
+  // POST /auth/reset-password
   app.post("/reset-password", async (request, reply) => {
     try {
       const { token, newPassword } = resetPasswordSchema.parse(request.body);
