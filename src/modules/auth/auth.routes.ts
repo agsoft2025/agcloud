@@ -1,15 +1,16 @@
 import { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastify";
 import { registerSchema, loginSchema, forgotPasswordSchema, resetPasswordSchema } from "./auth.schemas.js";
 import { userSchema, UserDocument } from "../user/user.schemas.js";
-import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import crypto from "crypto";
+import { randomBytes, createHash } from "crypto";
 import config from "../../config/index.js";
 import { z } from "zod";
 import { connectMongo } from "../../shared/db/mongo.client.js";
 import { ObjectId } from "mongodb";
 import { authenticate } from "../../shared/middleware/auth.middleware.js";
 import { handleActivity } from "../presence/presence.service.js";
+import { hashPassword, verifyPassword } from "../../shared/security/argon2.js";
+import logger from "../../shared/observability/logger.js";
 
 function cookieOptions(request: FastifyRequest) {
   const isHttps =
@@ -22,9 +23,22 @@ function cookieOptions(request: FastifyRequest) {
     httpOnly: true,
     secure: isHttps,
     sameSite: isHttps ? ("none" as const) : ("lax" as const),
-    maxAge: 7 * 24 * 60 * 60,
+    maxAge: 15 * 60, // 15 minutes - matches short-lived access token
   };
 }
+
+function signToken(userId: string, email: string): string {
+  return jwt.sign(
+    { userId, email, type: "access" },
+    config.jwtSecret,
+    { expiresIn: config.jwtAccessTokenExpiresIn as any }
+  );
+}
+
+// Strict rate limit: 10 requests per 15 minutes per IP
+const authRateLimitConfig = {
+  config: { rateLimit: { max: 10, timeWindow: "15 minutes" } },
+};
 
 const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   const db = await connectMongo();
@@ -43,7 +57,6 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         return reply.status(401).send({ message: "Authentication required" });
       }
 
-      // Update presence on every session resume (page reload, app open).
       handleActivity(user._id.toString()).catch(() => {});
 
       return reply.send({
@@ -55,13 +68,51 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         avatarUrl: user.avatarUrl ?? null,
       });
     } catch (error) {
-      console.error(error);
+      logger.error({ err: error }, "GET /auth/me failed");
+      return reply.status(500).send({ message: "Internal server error" });
+    }
+  });
+
+  // POST /auth/signup
+  app.post("/signup", authRateLimitConfig, async (request, reply) => {
+    try {
+      const body = registerSchema.parse(request.body);
+
+      const existingUser = await usersCollection.findOne({ email: body.email });
+      if (existingUser) {
+        return reply.status(409).send({ message: "User already exists" });
+      }
+
+      // argon2id - OWASP recommended
+      const passwordHash = await hashPassword(body.password);
+
+      const newUser = userSchema.parse({
+        email: body.email,
+        passwordHash,
+        displayName: body.displayName,
+        avatarUrl: body.avatarUrl,
+        phoneNumber: body.phoneNumber,
+      });
+
+      const result = await usersCollection.insertOne(newUser as UserDocument);
+
+      logger.info({ userId: result.insertedId }, "New user registered");
+
+      return reply.status(201).send({
+        message: "User registered successfully",
+        user: { id: result.insertedId, email: newUser.email, displayName: newUser.displayName },
+      });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return reply.status(400).send({ message: "Validation failed", errors: error.issues });
+      }
+      logger.error({ err: error }, "POST /auth/signup failed");
       return reply.status(500).send({ message: "Internal server error" });
     }
   });
 
   // POST /auth/signin
-  app.post("/signin", async (request, reply) => {
+  app.post("/signin", authRateLimitConfig, async (request, reply) => {
     try {
       const body = loginSchema.parse(request.body);
 
@@ -70,21 +121,20 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         return reply.status(401).send({ message: "Invalid email or password" });
       }
 
-      const isPasswordValid = await bcrypt.compare(body.password, user.passwordHash);
-      if (!isPasswordValid) {
+      const { valid, needsRehash } = await verifyPassword(body.password, user.passwordHash);
+      if (!valid) {
         return reply.status(401).send({ message: "Invalid email or password" });
       }
 
-      const token = jwt.sign(
-        { userId: user._id.toString(), email: user.email },
-        config.jwtSecret,
-        { expiresIn: config.jwtAccessTokenExpiresIn as any }
-      );
+      // Opportunistically upgrade bcrypt hashes to argon2id on next successful login
+      if (needsRehash) {
+        const newHash = await hashPassword(body.password);
+        await usersCollection.updateOne({ _id: user._id }, { $set: { passwordHash: newHash } });
+        logger.info({ userId: user._id }, "Password rehashed to argon2id");
+      }
 
+      const token = signToken(user._id.toString(), user.email);
       reply.setCookie("token", token, cookieOptions(request));
-
-      // Create Redis presence immediately on login so other users see this user
-      // as ONLINE right away (not deferred until Socket.IO connection completes).
       handleActivity(user._id.toString()).catch(() => {});
 
       const responsePayload: any = {
@@ -99,6 +149,7 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         },
       };
 
+      // Expose token in non-prod for Postman testing
       if (config.env !== "production") {
         responsePayload.token = token;
       }
@@ -108,7 +159,7 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       if (error instanceof z.ZodError) {
         return reply.status(400).send({ message: "Validation failed", errors: error.issues });
       }
-      console.error(error);
+      logger.error({ err: error }, "POST /auth/signin failed");
       return reply.status(500).send({ message: "Internal server error" });
     }
   });
@@ -116,8 +167,9 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   // POST /auth/refresh
   app.post("/refresh", async (request, reply) => {
     try {
-      const body = (request.body ?? {}) as { refreshToken?: string };
-      const existingToken = body.refreshToken ?? request.cookies.token;
+      const existingToken =
+        ((request.body ?? {}) as { refreshToken?: string }).refreshToken ??
+        request.cookies.token;
 
       if (!existingToken) {
         return reply.status(401).send({ message: "Authentication required" });
@@ -138,20 +190,13 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         return reply.status(401).send({ message: "Invalid or expired token" });
       }
 
-      const token = jwt.sign(
-        { userId: user._id.toString(), email: user.email },
-        config.jwtSecret,
-        { expiresIn: config.jwtAccessTokenExpiresIn as any }
-      );
-
+      const token = signToken(user._id.toString(), user.email);
       reply.setCookie("token", token, cookieOptions(request));
-
-      // Refresh = user is still active; update presence.
       handleActivity(user._id.toString()).catch(() => {});
 
       return reply.send({ accessToken: token, token });
     } catch (error: any) {
-      console.error(error);
+      logger.error({ err: error }, "POST /auth/refresh failed");
       return reply.status(500).send({ message: "Internal server error" });
     }
   });
@@ -162,82 +207,45 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     return reply.send({ message: "Logout successful" });
   });
 
-  // POST /auth/signup
-  app.post("/signup", async (request, reply) => {
-    try {
-      const body = registerSchema.parse(request.body);
-
-      const existingUser = await usersCollection.findOne({ email: body.email });
-      if (existingUser) {
-        return reply.status(409).send({ message: "User already exists" });
-      }
-
-      const passwordHash = await bcrypt.hash(body.password, 10);
-
-      const newUser = userSchema.parse({
-        email: body.email,
-        passwordHash,
-        displayName: body.displayName,
-        avatarUrl: body.avatarUrl,
-        phoneNumber: body.phoneNumber,
-      });
-
-      const result = await usersCollection.insertOne(newUser as UserDocument);
-
-      return reply.status(201).send({
-        message: "User registered successfully",
-        user: {
-          id: result.insertedId,
-          email: newUser.email,
-          displayName: newUser.displayName,
-        },
-      });
-    } catch (error: any) {
-      if (error instanceof z.ZodError) {
-        return reply.status(400).send({ message: "Validation failed", errors: error.issues });
-      }
-      console.error(error);
-      return reply.status(500).send({ message: "Internal server error" });
-    }
-  });
-
   // POST /auth/forgot-password
-  app.post("/forgot-password", async (request, reply) => {
+  app.post("/forgot-password", authRateLimitConfig, async (request, reply) => {
     try {
       const { email } = forgotPasswordSchema.parse(request.body);
       const user = await usersCollection.findOne({ email });
 
       if (user) {
-        const resetToken = crypto.randomBytes(32).toString("hex");
-        const resetTokenHash = crypto.createHash("sha256").update(resetToken).digest("hex");
-        const expires = new Date();
-        expires.setHours(expires.getHours() + 1);
+        const resetToken = randomBytes(32).toString("hex");
+        const resetTokenHash = createHash("sha256").update(resetToken).digest("hex");
+        const expires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
 
         await usersCollection.updateOne(
           { _id: user._id },
           { $set: { resetPasswordToken: resetTokenHash, resetPasswordExpires: expires } }
         );
 
-        console.log("[DEV ONLY] Reset token for " + email + ": " + resetToken);
+        // In production: send resetToken via email. In dev: log for Postman testing.
+        if (config.env !== "production") {
+          logger.debug({ email, resetToken }, "[DEV] Password reset token");
+        }
       }
 
+      // Always respond with same message to prevent email enumeration
       return reply.send({ message: "If that email exists, a password reset link has been sent." });
     } catch (error: any) {
       if (error instanceof z.ZodError) {
         return reply.status(400).send({ message: "Validation failed", errors: error.issues });
       }
-      console.error(error);
+      logger.error({ err: error }, "POST /auth/forgot-password failed");
       return reply.status(500).send({ message: "Internal server error" });
     }
   });
 
   // POST /auth/reset-password
-  app.post("/reset-password", async (request, reply) => {
+  app.post("/reset-password", authRateLimitConfig, async (request, reply) => {
     try {
       const { token, newPassword } = resetPasswordSchema.parse(request.body);
 
-      const resetTokenHash = crypto.createHash("sha256").update(token).digest("hex");
-
+      const resetTokenHash = createHash("sha256").update(token).digest("hex");
       const user = await usersCollection.findOne({
         resetPasswordToken: resetTokenHash,
         resetPasswordExpires: { $gt: new Date() },
@@ -247,7 +255,7 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         return reply.status(400).send({ message: "Invalid or expired reset token" });
       }
 
-      const passwordHash = await bcrypt.hash(newPassword, 10);
+      const passwordHash = await hashPassword(newPassword);
 
       await usersCollection.updateOne(
         { _id: user._id },
@@ -262,7 +270,7 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       if (error instanceof z.ZodError) {
         return reply.status(400).send({ message: "Validation failed", errors: error.issues });
       }
-      console.error(error);
+      logger.error({ err: error }, "POST /auth/reset-password failed");
       return reply.status(500).send({ message: "Internal server error" });
     }
   });

@@ -13,6 +13,7 @@
  */
 
 import type { FastifyReply, FastifyRequest } from "fastify";
+import logger from "../observability/logger.js";
 import { handleActivity } from "../../modules/presence/presence.service.js";
 
 export async function activityMiddleware(
@@ -24,6 +25,6 @@ export async function activityMiddleware(
 
   // Fire-and-forget: presence update must never delay the HTTP response.
   handleActivity(userId).catch((err) => {
-    request.log.warn({ err, userId }, "[activity-middleware] presence update failed");
+    logger.warn({ err, userId }, "[activity-middleware] presence update failed");
   });
 }

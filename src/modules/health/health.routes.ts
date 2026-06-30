@@ -3,6 +3,7 @@ import config from "../../config/index.js";
 import { connectMongo } from "../../shared/db/mongo.client.js";
 import { getRedisClient } from "../../shared/db/redis.client.js";
 import { checkLiveKitHealth } from "../livekit/livekit.service.js";
+import logger from "../../shared/observability/logger.js";
 
 const healthRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   // Production-grade Dashboard at the Root
@@ -194,7 +195,7 @@ const healthRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       const ping = await db.command({ ping: 1 });
       health.mongodb = !!ping.ok;
     } catch (e) {
-      app.log.error("MongoDB health check failed");
+      logger.error("MongoDB health check failed");
     }
 
     try {
@@ -202,13 +203,13 @@ const healthRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       const ping = await redis.ping();
       health.redis = ping === "PONG";
     } catch (e) {
-      app.log.error("Redis health check failed");
+      logger.error("Redis health check failed");
     }
 
     try {
       health.livekit = await checkLiveKitHealth();
     } catch (e) {
-      app.log.error("LiveKit health check failed");
+      logger.error("LiveKit health check failed");
     }
 
     const isReady = Object.values(health).every(v => v === true);

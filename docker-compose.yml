@@ -1,0 +1,66 @@
+version: "3.9"
+
+# Local development stack — provides MongoDB, Redis, and LiveKit.
+# The backend itself is run separately with `npm run dev`.
+#
+# Usage:
+#   docker compose up -d        # Start all services
+#   docker compose down         # Stop all services
+#   docker compose down -v      # Stop and remove volumes (wipes data)
+
+services:
+  # ── MongoDB ─────────────────────────────────────────────────────────────────
+  mongo:
+    image: mongo:7
+    container_name: agcloud-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: agcloud
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── Redis ────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: agcloud-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── LiveKit ──────────────────────────────────────────────────────────────────
+  # Uses LiveKit cloud instead of self-hosted for most deployments.
+  # Uncomment this block if you want a local LiveKit server (requires livekit.yaml).
+  #
+  # livekit:
+  #   image: livekit/livekit-server:latest
+  #   container_name: agcloud-livekit
+  #   restart: unless-stopped
+  #   ports:
+  #     - "7880:7880"    # HTTP / WebSocket
+  #     - "7881:7881"    # RTC TCP
+  #     - "50000-60000:50000-60000/udp"  # Media UDP range
+  #   command: --config /config/livekit.yaml --dev
+  #   volumes:
+  #     - ./livekit.yaml:/config/livekit.yaml:ro
+  #   environment:
+  #     LIVEKIT_KEYS: "APIJjJTXe9ENrmf: bwZ993Ne17aefPwQWETPgUyxQGykTGGXyHWWGgGjBQ1A"
+
+volumes:
+  mongo_data:
+  redis_data:

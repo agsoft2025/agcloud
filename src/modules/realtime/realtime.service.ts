@@ -21,6 +21,7 @@ import {
   handleHeartbeat,
   setSocketIOServer,
 } from "../presence/presence.service.js";
+import { socketCorsOriginCallback } from "../../shared/security/cors.js";
 
 let io: SocketIOServer | null = null;
 
@@ -50,7 +51,7 @@ function parseCookies(header: string): Record<string, string> {
 export function initRealtime(httpServer: HttpServer): SocketIOServer {
   io = new SocketIOServer(httpServer, {
     cors: {
-      origin: config.env === "production" ? config.frontendUrl : true,
+      origin: socketCorsOriginCallback,
       credentials: true,
     },
   });

@@ -13,18 +13,11 @@ const egressClient = new EgressClient(
   config.livekitApiKey,
   config.livekitApiSecret
 );
-// Start a room composite recording (egress)
+
 export async function startRoomRecording(roomName: string, fileOutput: { filepath: string }, options?: Partial<RoomCompositeOptions>) {
-  // fileOutput: { filepath: "/recordings/room-<roomName>-<timestamp>.mp4" }
-  // options: { layout, audioOnly, videoOnly, encodingOptions, ... }
-  return await egressClient.startRoomCompositeEgress(
-    roomName,
-    fileOutput as any,
-    options || {}
-  );
+  return await egressClient.startRoomCompositeEgress(roomName, fileOutput as any, options || {});
 }
 
-// Stop a recording by egressId
 export async function stopRecording(egressId: string) {
   return await egressClient.stopEgress(egressId);
 }
@@ -40,7 +33,7 @@ export async function endLiveKitRoom(roomName: string): Promise<void> {
 export async function createLiveKitToken(identity: string, roomName: string) {
   const at = new AccessToken(config.livekitApiKey, config.livekitApiSecret, {
     identity,
-    ttl: 60 * 60
+    ttl: 60 * 60,
   });
 
   const grant: VideoGrant = {
@@ -56,7 +49,6 @@ export async function createLiveKitToken(identity: string, roomName: string) {
 
 export async function checkLiveKitHealth(): Promise<boolean> {
   try {
-    // List rooms as a lightweight way to verify connectivity and credentials
     await roomService.listRooms();
     return true;
   } catch (error) {
@@ -65,6 +57,16 @@ export async function checkLiveKitHealth(): Promise<boolean> {
   }
 }
 
-export function getLiveKitBaseUrl() {
-  return config.livekitUrl;
+/**
+ * Returns the LiveKit URL that clients (browsers / mobile apps) should connect to.
+ * In Docker/Kubernetes, LIVEKIT_URL is the internal hostname.
+ * Set LIVEKIT_PUBLIC_URL to the public WebSocket URL for clients.
+ */
+export function getLiveKitPublicUrl(): string {
+  return config.livekitPublicUrl ?? config.livekitUrl;
+}
+
+/** @deprecated Use getLiveKitPublicUrl() */
+export function getLiveKitBaseUrl(): string {
+  return getLiveKitPublicUrl();
 }
