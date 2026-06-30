@@ -13,13 +13,18 @@
   "dependencies": {
     "@fastify/cookie": "^9.4.0",
     "@fastify/cors": "^9.0.0",
+    "@fastify/helmet": "^11.1.1",
+    "@fastify/rate-limit": "^8.1.1",
+    "argon2": "^0.44.0",
     "bcrypt": "^6.0.0",
     "dotenv": "^16.3.1",
     "fastify": "^4.25.0",
+    "fastify-raw-body": "^4.3.0",
     "ioredis": "^5.3.2",
     "jsonwebtoken": "^9.0.0",
     "livekit-server-sdk": "^2.15.3",
     "mongodb": "^6.0.0",
+    "pino": "^10.3.1",
     "socket.io": "^4.8.3",
     "zod": "^4.4.2"
   },

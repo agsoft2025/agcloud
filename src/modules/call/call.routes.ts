@@ -1,11 +1,13 @@
 import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { initCallSchema, addParticipantSchema } from "./call.schemas.js";
-import { createLiveKitToken, endLiveKitRoom, getLiveKitBaseUrl, startRoomRecording, stopRecording } from "../livekit/livekit.service.js";
+import { createLiveKitToken, endLiveKitRoom, getLiveKitPublicUrl, startRoomRecording, stopRecording } from "../livekit/livekit.service.js";
 import { CallRepository } from "./call.repository.js";
 import { CallStateMachine } from "./call.state-machine.js";
 import { authenticate } from "../../shared/middleware/auth.middleware.js";
 import { emitToUser } from "../realtime/realtime.service.js";
 import { UserRepository } from "../user/user.repository.js";
+import { notifyIncomingCall } from "../notification/notification.service.js";
+import logger from "../../shared/observability/logger.js";
 import config from "../../config/index.js";
 
 const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
@@ -116,17 +118,27 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     // Notify all receivers in real time so they see an incoming call popup
     const caller = await userRepo.getUserById(callerId);
     const callId = callRecord._id.toString();
+    const incomingCallPayload = {
+      callId,
+      callerId,
+      callerName: caller?.displayName ?? "Unknown",
+      callerAvatar: caller?.avatarUrl ?? null,
+      callType: callRecord.callType,
+      callMode: callRecord.callMode,
+      roomId,
+      reinvite: false,
+    };
+
     for (const receiverId of receiverIds) {
-      emitToUser(receiverId, "call:incoming", {
+      emitToUser(receiverId, "call:incoming", incomingCallPayload);
+      notifyIncomingCall(receiverId, {
         callId,
         callerId,
         callerName: caller?.displayName ?? "Unknown",
-        callerAvatar: caller?.avatarUrl ?? null,
+        callerAvatar: caller?.avatarUrl,
         callType: callRecord.callType,
-        callMode: callRecord.callMode,
         roomId,
-        reinvite: false,
-      });
+      }).catch((err: unknown) => logger.warn({ err, receiverId }, "Push notification failed"));
     }
 
     return reply.status(201).send({
@@ -134,7 +146,7 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       call: callRecord,
       token,
       roomName: roomId,
-      url: getLiveKitBaseUrl()
+      url: getLiveKitPublicUrl(),
     });
   });
 
@@ -309,7 +321,7 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       call: callRecord,
       token,
       roomName: roomId,
-      url: getLiveKitBaseUrl()
+      url: getLiveKitPublicUrl()
     });
   });
 
