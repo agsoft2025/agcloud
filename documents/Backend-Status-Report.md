@@ -1,30 +1,18 @@
 # agcloud Backend — Development Status Report
 
-**Date:** July 3, 2026
-**Branch reviewed:** `dev` (commit `b22d4cc`)
+**Date:** July 10, 2026
+**Branch reviewed:** `dev` (commit `4f87837`)
 **Reference spec:** `documents/Backend-Specification.md`
 **Prepared by:** Claude Code
-**Previous report:** June 28, 2026 (commit `d9aaa22`)
+**Previous report:** July 3, 2026 (commit `b22d4cc` / feature/authtoken merge)
 
 ---
 
-## What Changed Since the Last Report
+## Activity Since Last Report
 
-| Module | June 28 | July 3 | Change |
-|---|---|---|---|
-| Auth | 70% | 88% | argon2id migrated, rate limiting, error handler, GET /auth/me added |
-| Call Lifecycle | 75% | 80% | Push notifications wired, GET /calls/:id added, missed state on end |
-| LiveKit Integration | 50% | 90% | Webhook HMAC fixed, public URL fixed, participant_joined + egress_ended handlers |
-| User / Contacts | 50% | 80% | PUT /users/me, /users/:id/presence, Redis-backed bulk presence |
-| Realtime (Socket.IO) | 75% | 80% | Presence broadcasts now Redis pub/sub scoped per-instance |
-| **Presence** | **Not tracked** | **90%** | **New full module — Redis-backed ONLINE/AWAY/OFFLINE with background worker** |
-| Push Notifications | 0% | 90% | FCM v1, APNs + VoIP, device registration all implemented |
-| Health / Admin | 65% | 70% | /metrics endpoint added (Prometheus format) |
-| Security Infrastructure | 15% | 85% | Rate limiting, argon2id, helmet, CORS module, MongoDB indexes all done |
-| Observability | 0% | 60% | Custom structured JSON logger, metrics, request ID propagation done |
-| Reliability Utilities | 5% | 65% | Circuit breaker, retry, idempotency implemented (not yet wired) |
-| Testing | 10% | 15% | cors.test.ts added |
-| Infrastructure | Partial | 70% | docker-compose.yml restored; MongoDB indexes created on startup |
+No source code commits landed on `dev` between July 3 and July 10. The only commit (`4f87837 Updated Status Report`) was the July 3 report document itself. All module statuses are unchanged from last week.
+
+One correction to the July 3 report: **Bug 5 ("push notifications are synchronous") was incorrect.** The `notifyIncomingCall` call in `POST /calls/initiate` already uses fire-and-forget with `.catch()` — it does not block the HTTP response. That item has been removed from the open bug list.
 
 ---
 
@@ -32,357 +20,319 @@
 
 | Module | Progress | Status |
 |---|---|---|
-| Auth | 88% | Functional and largely secure; refresh token rotation still incomplete |
+| Auth | 88% | Functional and secure; refresh token rotation still incomplete |
 | Call Lifecycle | 80% | Core flow solid; cancel, 60s timeout, callee-busy check still missing |
-| LiveKit Integration | 90% | All critical bugs fixed; dev bypass acceptable for now |
+| LiveKit Integration | 90% | All critical bugs resolved |
 | User / Contacts | 80% | Presence Redis-backed; contacts CRUD + blocklist still missing |
-| Presence | 90% | Full Redis-backed presence with worker; not scoped to contacts only |
-| Realtime (Socket.IO) | 80% | Solid; no rate limiting on WebSocket connections |
-| Push Notifications | 90% | FCM + APNs + VoIP working; runs synchronously (no BullMQ queue) |
-| Health / Admin | 70% | Metrics endpoint done; /live and /ready path mismatch remains |
+| Presence | 90% | Full Redis-backed system with worker; not scoped to contacts only |
+| Realtime (Socket.IO) | 80% | No rate limiting on WebSocket connections |
+| Push Notifications | 90% | FCM + APNs + VoIP; fire-and-forget delivery confirmed |
+| Health / Admin | 70% | Metrics endpoint done; /live /ready path mismatch remains |
 | Security Infrastructure | 85% | All major items done; audit logging missing |
 | Observability | 60% | Custom logger + metrics done; not Pino/prom-client; no OpenTelemetry |
-| Reliability Utilities | 65% | Utilities built; none wired to actual external service calls |
+| Reliability Utilities | 65% | Circuit breaker, retry, idempotency built but not wired |
 | Testing | 15% | Auth + CORS tests only |
-| Infrastructure | 70% | docker-compose.yml back; Dockerfile SSH artifact still present |
+| Infrastructure | 70% | docker-compose.yml present; Dockerfile SSH artifact remains |
 
 ---
 
 ## What Is Working Today
 
-The following can be tested end-to-end via Postman or the built-in WebRTC tester at `GET /calls/test`:
+The following can be tested end-to-end via Postman or `GET /calls/test`:
 
-- User registration with **argon2id** password hashing
-- Login / logout with 15-minute access token (httpOnly cookie)
-- Opportunistic bcrypt → argon2id migration on next login
+- User registration with **argon2id** hashing; bcrypt → argon2id migration on next login
+- Login / logout with 15-minute httpOnly cookie
 - Password forgot / reset flow
-- Initiate a 1:1 or conference call → LiveKit room created, token + **public WebSocket URL** returned
-- Real-time incoming call notification via Socket.IO **and push notification** (FCM Android / APNs iOS / VoIP PushKit)
-- Accept / reject / end a call with proper Socket.IO events to all participants
-- Re-invite a missed or rejected participant
-- Start and stop call recording (LiveKit Egress)
-- Call history with pagination (`GET /calls/history`)
+- `GET /auth/me` — current user profile
+- Initiate a 1:1 or conference call → LiveKit room, token, and **public WebSocket URL** returned
+- Real-time `call:incoming` via Socket.IO **and** fire-and-forget push notification (FCM Android / APNs iOS / VoIP PushKit)
+- Accept, reject, end a call with proper Socket.IO events to all participants
+- Re-invite a missed or rejected participant to an ongoing conference
+- Start / stop call recording (LiveKit Egress)
+- `GET /calls/history` with pagination
+- `GET /calls/:id` — single call detail
 - Register and unregister device push tokens (`POST /devices/register`, `DELETE /devices/:token`)
 - User list with search, pagination, and **live Redis presence** (`GET /users`)
-- Single user profile with live presence (`GET /users/:id`)
-- Real-time per-user presence (`GET /users/:id/presence`)
-- Bulk presence for all users (`GET /users/presence`)
-- Update own profile (`PUT /users/me`)
-- Health dashboard at `GET /` showing live Mongo / Redis / LiveKit status
-- Liveness and readiness checks at `GET /live` and `GET /ready`
+- `GET /users/:id` — single user profile with live presence
+- `GET /users/:id/presence` — real-time Redis-backed per-user presence
+- `GET /users/presence` — bulk presence for all users
+- `PUT /users/me` — update own display name / avatar
+- LiveKit webhooks verified with HMAC: `room_finished`, `participant_joined`, `participant_left`, `egress_ended`
+- Health dashboard at `GET /`; liveness `GET /live`; readiness `GET /ready`
 - Prometheus-format metrics at `GET /metrics`
-- Webhook events from LiveKit (`room_finished`, `participant_joined`, `participant_left`, `egress_ended`) — **HMAC verified**
+- Rate limiting: 200 req/min global, 10 req/15 min on auth endpoints
+- `@fastify/helmet` security headers (CSP + HSTS in production)
+- MongoDB indexes auto-created on startup (users, calls, devices)
+- Global request ID propagation (`X-Request-ID`)
 
 ---
 
 ## Module Detail
 
-### Auth Module — 88% (up from 70%)
-
-| Endpoint / Feature | Status | Notes |
-|---|---|---|
-| `POST /auth/signup` | ✅ Done | argon2id — FIXED |
-| `POST /auth/signin` | ✅ Done | 15-min cookie; bcrypt → argon2id migration on successful login |
-| `POST /auth/signout` | ✅ Done | |
-| `GET /auth/me` | ✅ Done | **New since last report** |
-| `POST /auth/forgot-password` | ✅ Done | |
-| `POST /auth/reset-password` | ✅ Done | |
-| `POST /auth/refresh` | ⚠️ Partial | Accepts expired access token with `ignoreExpiration:true` and re-issues. `jwt.ts` has a proper `signRefreshToken / verifyRefreshToken` pair, but `auth.routes.ts` does not use it — two parallel implementations exist |
-| Debug log leaking password hash | ✅ Fixed | All `console.log("<><>passwordHash")` lines removed |
-| argon2id password hashing | ✅ Fixed | `argon2.ts` fully implemented — argon2id with bcrypt fallback for migration |
-| Short-lived access tokens (15 min) | ✅ Fixed | Cookie `maxAge` = 900 s, token `expiresIn` = 15m |
-| Rate limiting on login / signup | ✅ Fixed | 10 req / 15 min per IP via `@fastify/rate-limit` |
-| Error handler (no stack trace leaks) | ✅ Fixed | `error-handler.ts` fully implemented |
-| Refresh token rotation | ❌ Missing | `jwt.ts` infra exists but `auth.routes.ts` ignores it — no token revocation |
-| Redis session blacklist | ❌ Missing | Stolen cookie is valid until expiry |
-| Audit logging | ❌ Missing | No writes to `audit_logs` collection |
-
----
-
-### Call Module — 80% (up from 75%)
-
-| Endpoint / Feature | Status | Notes |
-|---|---|---|
-| `POST /calls/initiate` | ✅ Done | Emits `call:incoming` via Socket.IO **and** push notification to each receiver |
-| `POST /calls/:id/accept` | ✅ Done | |
-| `POST /calls/:id/reject` | ✅ Done | Conference per-participant; 1:1 full rejection |
-| `POST /calls/:id/end` | ✅ Done | Marks pending invites as `missed` |
-| `GET /calls/:id` | ✅ Done | **New since last report** |
-| `GET /calls/history` | ✅ Done | Paginated |
-| `POST /calls/:id/add-participant` | ✅ Done | Conference re-invite supported |
-| `POST /calls/:id/record/start` | ✅ Done | LiveKit Egress |
-| `POST /calls/:id/record/stop` | ✅ Done | |
-| `missed` state on unanswered call | ⚠️ Partial | `markPendingParticipantsAsMissed` is called when the caller ends the call. There is no automatic 60-second timeout — a call stays `initiated` forever if the caller never hangs up |
-| `POST /calls/:id/cancel` | ❌ Missing | Caller-side cancel before pickup |
-| 60-second auto-timeout → missed | ❌ Missing | Requires BullMQ delayed job or Redis TTL — not implemented |
-| Callee busy detection | ❌ Missing | Only checks if the **caller** is in an active call. Callee can receive a call invite while already in another call |
-| Idempotency key on `POST /calls/initiate` | ❌ Missing | `idempotency.ts` utility exists but is not wired to any route |
-
----
-
-### LiveKit Module — 90% (up from 50%)
-
-All three critical bugs from previous reports are now fixed.
+### Auth — 88%
 
 | Feature | Status | Notes |
 |---|---|---|
-| Token generation | ✅ Done | SDK v2 compatible |
-| Room delete on call end | ✅ Done | |
-| Egress (recording) start / stop | ✅ Done | |
-| LiveKit health check | ✅ Done | |
-| `POST /livekit/webhook` — HMAC | ✅ Fixed | `fastify-raw-body` registered; raw string passed to `receiver.receive()` |
-| Public URL returned to clients | ✅ Fixed | `getLiveKitPublicUrl()` returns `LIVEKIT_PUBLIC_URL` (falls back to `LIVEKIT_URL`) |
-| `room_finished` handler | ✅ Done | Auto-ends call, marks pending invites missed, emits `call:ended` |
-| `participant_joined` handler | ✅ Done | **New** — transitions call from `initiated` → `active` |
-| `participant_left` handler | ✅ Done | Ends 1:1 call when a participant leaves |
-| `egress_ended` handler | ✅ Done | **New** — saves `recordingUrl` to call document |
-| No-auth-header dev bypass | ⚠️ Acceptable | Allowed in non-production only; production rejects requests without `Authorization` |
-| `room_started` event handler | ❌ Missing | Not required for current flow |
+| `POST /auth/signup` | ✅ | argon2id hashing |
+| `POST /auth/signin` | ✅ | 15-min cookie; opportunistic bcrypt→argon2id migration |
+| `POST /auth/signout` | ✅ | |
+| `GET /auth/me` | ✅ | |
+| `POST /auth/forgot-password` | ✅ | Reset token SHA-256 hashed in DB |
+| `POST /auth/reset-password` | ✅ | Expiry validated |
+| Rate limiting on auth endpoints | ✅ | 10 req / 15 min per IP |
+| argon2id hashing | ✅ | With bcrypt migration fallback |
+| 15-min access token | ✅ | Cookie `maxAge` = 900 s, `expiresIn` = 15m |
+| `POST /auth/refresh` | ⚠️ Partial | Accepts expired access token with `ignoreExpiration: true` and re-signs. `jwt.ts` has `signRefreshToken` / `verifyRefreshToken` with a separate `jwtRefreshSecret`, but `auth.routes.ts` defines its own `signToken` and never calls either function — **two parallel implementations, neither complete** |
+| Refresh token rotation | ❌ | No opaque refresh token; no revocation |
+| Redis session blacklist | ❌ | Stolen cookie valid until 15-min expiry |
+| Audit logging | ❌ | No writes to `audit_logs` collection |
 
 ---
 
-### Presence Module — 90% (New)
-
-Entirely new Redis-backed presence system added since the last report.
+### Call Lifecycle — 80%
 
 | Feature | Status | Notes |
 |---|---|---|
-| Redis hash per user (`presence:user:{id}`) | ✅ Done | Stores `status`, `lastActivity`, `lastHeartbeat`, `lastSeen` |
-| Socket set per user (`:sockets`) | ✅ Done | Tracks active socket IDs for multi-device support |
-| Grace period on disconnect (`:grace`, 30s TTL) | ✅ Done | Prevents flicker on mobile app backgrounding |
-| `ONLINE / AWAY / OFFLINE` status derivation | ✅ Done | ONLINE = activity < 2 min; AWAY = socket open; OFFLINE = no socket + stale > 10 min |
-| Startup socket cleanup | ✅ Done | Clears all stale socket sets on restart so users aren't stuck as ONLINE |
-| Background evaluation worker (60s interval) | ✅ Done | Applies ONLINE→AWAY and →OFFLINE transitions |
-| MongoDB DB sync worker (5 min interval) | ✅ Done | Persists Redis status to `users.presenceStatus` |
-| Redis pub/sub fan-out (`presence:broadcast`) | ✅ Done | Cross-instance broadcast; subscribers emit to Socket.IO |
-| Activity middleware (global HTTP hook) | ✅ Done | Updates `lastActivity` after every authenticated request (throttled 30s) |
-| Heartbeat handler | ✅ Done | Updates `lastHeartbeat` on WebSocket PING |
-| Presence scoped to contacts only | ❌ Missing | `io.emit(event, ...)` sends presence updates to **all** connected sockets, not just the user's contacts |
-| Rate limiting on WebSocket connections | ❌ Missing | |
+| `POST /calls/initiate` | ✅ | Socket.IO + fire-and-forget push to all receivers |
+| `POST /calls/:id/accept` | ✅ | |
+| `POST /calls/:id/reject` | ✅ | Per-participant for conference; full for 1:1 |
+| `POST /calls/:id/end` | ✅ | Marks pending invites as `missed`; deletes LiveKit room |
+| `GET /calls/:id` | ✅ | Authorization checked |
+| `GET /calls/history` | ✅ | Paginated, desc by `createdAt` |
+| `POST /calls/:id/add-participant` | ✅ | Conference re-invite supported |
+| `POST /calls/:id/record/start` | ✅ | LiveKit Egress |
+| `POST /calls/:id/record/stop` | ✅ | |
+| `missed` participant status on end | ✅ | `markPendingParticipantsAsMissed` called on hang-up |
+| `POST /calls/:id/cancel` | ❌ | Caller-side cancel before pickup — not implemented |
+| 60-second auto-timeout → missed | ❌ | No BullMQ delayed job or Redis TTL; call stays `initiated` until caller hangs up |
+| Callee busy detection | ❌ | `POST /calls/initiate` checks only the **caller's** active call. A callee already in a call still receives the incoming ring |
+| Idempotency on `POST /calls/initiate` | ❌ | `idempotency.ts` utility exists but is not wired here |
 
 ---
 
-### User Module — 80% (up from 50%)
-
-| Endpoint / Feature | Status | Notes |
-|---|---|---|
-| `GET /users` (list, search, pagination) | ✅ Done | Live Redis presence enriched via batch pipeline |
-| `GET /users/presence` (bulk) | ✅ Done | **Redis-backed** — fixed from MongoDB-only in last report |
-| `GET /users/:id` | ✅ Done | |
-| `GET /users/:id/presence` | ✅ Done | **New** — Redis source of truth with MongoDB `lastSeen` fallback |
-| `GET /auth/me` | ✅ Done | **New** — current user profile endpoint |
-| `PUT /users/me` | ✅ Done | **New** — `displayName` and `avatarUrl` update |
-| `GET /users/me/contacts` | ❌ Missing | |
-| `POST/DELETE /users/me/contacts/:id` | ❌ Missing | |
-| `POST /users/me/block/:id` | ❌ Missing | `isBlocked` field exists in schema but nothing sets it |
-
----
-
-### Notification Module — 90% (up from 0%)
+### LiveKit Integration — 90%
 
 | Feature | Status | Notes |
 |---|---|---|
-| FCM v1 (Android / Web) | ✅ Done | OAuth2 service-account token; auto-refreshed 1 min before expiry |
-| APNs (iOS alerts) | ✅ Done | JWT auth, sandbox/production toggle |
-| VoIP push (PushKit) | ✅ Done | `pushType: "voip"`, zero expiration |
-| `POST /devices/register` | ✅ Done | Upserts by `(userId, platform, token)`; stores optional `voipToken` |
-| `DELETE /devices/:token` | ✅ Done | |
-| `notifyIncomingCall` | ✅ Done | Wired into `POST /calls/initiate` |
-| `notifyMissedCall` | ✅ Done | Defined but not yet called (no 60s timeout trigger) |
-| Metrics (`push_notifications_sent/failed`) | ✅ Done | Labelled by platform |
-| Asynchronous delivery (BullMQ) | ❌ Missing | Push calls run synchronously in the HTTP handler; a slow/failed FCM/APNs call delays the response |
+| Token generation (SDK v2) | ✅ | |
+| Room delete on call end | ✅ | Graceful 404 handling |
+| Egress start / stop | ✅ | |
+| LiveKit health check | ✅ | |
+| Webhook HMAC verification | ✅ | `fastify-raw-body` registered; raw string passed to `receiver.receive()` |
+| Public URL returned to clients | ✅ | `getLiveKitPublicUrl()` returns `LIVEKIT_PUBLIC_URL` env var |
+| `room_finished` handler | ✅ | Auto-ends call; emits `call:ended` to all |
+| `participant_joined` handler | ✅ | Transitions `initiated` → `active` |
+| `participant_left` handler | ✅ | Ends 1:1 call on departure |
+| `egress_ended` handler | ✅ | Saves `recordingUrl` to call document |
+| No-auth dev bypass | ⚠️ Acceptable | Allowed only in non-production |
 
 ---
 
-### Realtime Module — 80% (up from 75%)
+### Presence — 90%
 
 | Feature | Status | Notes |
 |---|---|---|
-| Socket.IO server with JWT auth | ✅ Done | |
-| `emitToUser(userId, event, payload)` | ✅ Done | Routes to all active sockets for a user |
-| Multi-device support | ✅ Done | |
-| Re-notify pending calls on reconnect | ✅ Done | |
-| Presence via Redis pub/sub | ✅ Done | Presence events now routed through Redis pub/sub instead of direct `io.emit` |
-| Presence scoped to contacts | ❌ Missing | All connected users receive all presence events |
-| Rate limiting on socket connections | ❌ Missing | |
+| Redis-backed status (ONLINE / AWAY / OFFLINE) | ✅ | |
+| Per-user socket set for multi-device | ✅ | |
+| 30-second grace period on disconnect | ✅ | Prevents flicker on mobile backgrounding |
+| Startup socket cleanup | ✅ | Clears stale socket sets from previous process |
+| Background evaluation worker (60s) | ✅ | ONLINE→AWAY→OFFLINE transitions |
+| DB sync worker (5 min) | ✅ | Persists Redis status to `users.presenceStatus` |
+| Cross-instance Redis pub/sub | ✅ | `presence:broadcast` channel; subscriber emits to Socket.IO |
+| Activity middleware (global HTTP hook) | ✅ | Throttled 30 s; updates `lastActivity` after auth'd requests |
+| Presence scoped to contacts | ❌ | `io.emit(event, payload)` in `presence.service.ts:64` broadcasts to **all** connected sockets |
+| WS rate limiting | ❌ | |
 
 ---
 
-### Health Module — 70% (up from 65%)
+### User Module — 80%
+
+| Endpoint | Status | Notes |
+|---|---|---|
+| `GET /users` (list, search, pagination) | ✅ | Redis presence enriched via batch pipeline |
+| `GET /users/presence` (bulk) | ✅ | Redis source of truth |
+| `GET /users/:id` | ✅ | |
+| `GET /users/:id/presence` | ✅ | Redis with MongoDB `lastSeen` fallback |
+| `GET /auth/me` | ✅ | Current user profile |
+| `PUT /users/me` | ✅ | `displayName` and `avatarUrl` |
+| `GET /users/me/contacts` | ❌ | |
+| `POST /DELETE /users/me/contacts/:id` | ❌ | |
+| `POST /users/me/block/:id` | ❌ | `isBlocked` field in schema; nothing sets it |
+
+---
+
+### Notification Module — 90%
 
 | Feature | Status | Notes |
 |---|---|---|
-| HTML health dashboard at `GET /` | ✅ Done | |
-| `GET /live` (liveness) | ✅ Done | |
-| `GET /ready` (readiness) | ✅ Done | Checks MongoDB, Redis, LiveKit |
-| `GET /metrics` (Prometheus format) | ✅ Done | **New** — custom in-memory counter/histogram format |
-| `/health/live` and `/health/ready` paths | ❌ Path mismatch | `healthRoutes` registered without prefix in `app.ts` — still at `/live` and `/ready`. K8s probes expect `/health/*` |
-| `GET /admin/calls/active` | ❌ Missing | |
+| FCM v1 (Android / Web) | ✅ | OAuth2 service-account JWT; auto-refreshed |
+| APNs alert push (iOS) | ✅ | JWT auth; sandbox / production toggle |
+| VoIP PushKit push (iOS) | ✅ | `pushType: "voip"`, zero expiration |
+| `POST /devices/register` | ✅ | Upserts by `(userId, platform, token)` |
+| `DELETE /devices/:token` | ✅ | |
+| `notifyIncomingCall` wired to `/calls/initiate` | ✅ | Fire-and-forget; failure logged, not fatal |
+| `notifyMissedCall` | ✅ Defined | Not yet triggered (needs 60s timeout) |
+| Metrics (`push_notifications_sent/failed`) | ✅ | Labelled by platform |
+| Async delivery via BullMQ | ❌ | Calls are direct HTTP to FCM/APNs within the request; no job queue |
 
 ---
 
-### Security Infrastructure — 85% (up from 15%)
+### Realtime (Socket.IO) — 80%
 
 | Feature | Status | Notes |
 |---|---|---|
-| JWT auth middleware | ✅ Done | |
-| `@fastify/cors` with origin allowlist | ✅ Done | `cors.ts` module; also allows `localhost` and `*.devtunnels.ms` in dev |
-| `@fastify/cookie` | ✅ Done | |
-| `@fastify/helmet` (security headers) | ✅ Fixed | CSP + HSTS enabled in production only |
-| argon2id hashing | ✅ Fixed | Full implementation with bcrypt migration path |
-| `crypto.ts` (secure token, hash, safe compare) | ✅ Done | |
-| `jwt.ts` (signAccessToken + signRefreshToken) | ✅ Done | Infrastructure present; `auth.routes.ts` has its own parallel `signToken` and doesn't use these |
-| Global rate limiting | ✅ Fixed | 200 req/min global; 10 req/15 min on auth endpoints |
-| Error handler | ✅ Fixed | |
-| MongoDB indexes | ✅ Fixed | `ensureIndexes()` called on startup: `users.email` unique, call status, room ID, egress ID, device unique |
-| Redis session blacklist | ❌ Missing | |
-| Audit logging | ❌ Missing | |
+| JWT auth on connection | ✅ | |
+| `emitToUser(userId, event, payload)` | ✅ | Routes to all active sockets for a user |
+| Multi-device support | ✅ | |
+| Re-notify pending calls on reconnect | ✅ | |
+| Presence events via Redis pub/sub | ✅ | No longer uses raw `io.emit` for call events |
+| Presence scoped to contacts | ❌ | Presence broadcasts still hit all sockets (`io.emit` in presence subscriber) |
+| WS connection rate limiting | ❌ | |
 
 ---
 
-### Observability — 60% (up from 0%)
+### Health / Admin — 70%
 
 | Feature | Status | Notes |
 |---|---|---|
-| Structured JSON logger | ✅ Done | Custom implementation writing JSON to stdout/stderr; respects `LOG_LEVEL` env var |
-| Pino integration | ⚠️ Partial | `pino` is in `package.json` but unused — Fastify's built-in pino instance is configured, while the custom logger is used everywhere else |
-| Prometheus-format metrics at `/metrics` | ✅ Done | Custom in-memory counters/histograms for HTTP, calls, push; not `prom-client` |
-| Request ID propagation | ✅ Done | `X-Request-ID` header honoured and echoed; attached to request logger |
-| OpenTelemetry distributed tracing | ❌ Missing | `tracing.ts` is a lightweight request ID hook only — no spans, no trace propagation |
-| PII redaction in logs | ✅ Done | No sensitive fields logged (password hash log removed) |
+| HTML health dashboard at `GET /` | ✅ | Mongo / Redis / LiveKit status |
+| `GET /live` (liveness) | ✅ | |
+| `GET /ready` (readiness) | ✅ | Checks all three dependencies |
+| `GET /metrics` (Prometheus format) | ✅ | Custom in-memory counters/histograms |
+| `/health/live` and `/health/ready` paths | ❌ Path mismatch | `healthRoutes` registered without prefix in `app.ts` — still at `/live` `/ready`. One-line fix. |
+| `GET /admin/calls/active` | ❌ | |
 
 ---
 
-### Reliability Utilities — 65% (up from 5%)
+### Security Infrastructure — 85%
 
 | Feature | Status | Notes |
 |---|---|---|
-| Graceful shutdown (SIGTERM / SIGINT) | ✅ Done | Stops presence worker, closes Redis, closes Fastify |
-| Redis error handling + reconnect | ✅ Done | |
-| `circuit-breaker.ts` | ✅ Done | Full CLOSED/OPEN/HALF_OPEN state machine with timeout support |
-| `retry.ts` | ✅ Done | Exponential backoff with jitter |
-| `idempotency.ts` | ✅ Done | Redis-backed; `withIdempotency` wrapper available |
-| Circuit breakers wired to external calls | ❌ Missing | None of LiveKit, FCM, or APNs calls use `CircuitBreaker.execute()` |
-| Retry wired to external calls | ❌ Missing | `withRetry` built but not used |
-| Idempotency wired to mutating routes | ❌ Missing | `withIdempotency` built but not applied to `/calls/initiate` or other routes |
-| BullMQ async job queue | ❌ Missing | Push notifications are synchronous in HTTP handlers |
+| JWT auth middleware | ✅ | Bearer header or cookie |
+| `@fastify/cors` | ✅ | `cors.ts` allows `FRONTEND_URL` + `localhost` + `*.devtunnels.ms` in dev |
+| `@fastify/helmet` | ✅ | CSP + HSTS in production |
+| argon2id + bcrypt migration | ✅ | |
+| Global rate limiting | ✅ | 200 req/min; 10/15 min on auth |
+| Error handler | ✅ | Zod formatting; stack omitted in production |
+| MongoDB indexes | ✅ | `ensureIndexes()` on startup |
+| `crypto.ts` (token gen, hash, safe compare) | ✅ | |
+| `jwt.ts` (access + refresh token signing) | ✅ Implemented | Not wired into `auth.routes.ts` |
+| Redis session blacklist | ❌ | |
+| Audit logging | ❌ | |
 
 ---
 
-### Testing — 15% (up from 10%)
+### Observability — 60%
+
+| Feature | Status | Notes |
+|---|---|---|
+| Structured JSON logger | ✅ | Custom — writes JSON to stdout/stderr; respects `LOG_LEVEL` |
+| Pino | ⚠️ Partial | Listed in `package.json`; Fastify's built-in pino is configured at bootstrap, but the custom logger is used everywhere else. Two logging paths exist. |
+| `/metrics` Prometheus-format | ✅ | Custom in-memory counters/histograms — not `prom-client`; no native Grafana scrape compatibility |
+| Request ID propagation | ✅ | `X-Request-ID` honoured and echoed |
+| OpenTelemetry tracing | ❌ | `tracing.ts` is only request ID attachment — no spans, no propagation |
+| PII in logs | ✅ | Password hash debug log removed; no sensitive fields logged |
+
+---
+
+### Reliability Utilities — 65%
+
+| Feature | Status | Notes |
+|---|---|---|
+| Graceful shutdown | ✅ | Stops presence worker, closes Redis + Fastify |
+| `circuit-breaker.ts` | ✅ Implemented | Not applied to any LiveKit, FCM, or APNs calls |
+| `retry.ts` | ✅ Implemented | Not called anywhere |
+| `idempotency.ts` | ✅ Implemented | Not wired to any route |
+| BullMQ async job queue | ❌ | |
+
+---
+
+### Testing — 15%
 
 | Area | Status |
 |---|---|
-| Auth routes test (`test/auth.routes.test.ts`) | ✅ Done |
-| CORS test (`test/cors.test.ts`) | ✅ Done — **New** |
-| Call module tests | ❌ Missing |
-| User module tests | ❌ Missing |
-| Presence module tests | ❌ Missing |
-| Notification module tests | ❌ Missing |
-| LiveKit module tests | ❌ Missing |
-| Integration tests (real Mongo + Redis) | ❌ Missing |
+| `test/auth.routes.test.ts` | ✅ |
+| `test/cors.test.ts` | ✅ |
+| Call module | ❌ |
+| Presence module | ❌ |
+| User module | ❌ |
+| Notification module | ❌ |
+| LiveKit module | ❌ |
+| Integration tests (real Mongo + Redis) | ❌ |
 
 ---
 
-### Infrastructure — 70% (up from Partial)
+### Infrastructure — 70%
 
 | Item | Status | Notes |
 |---|---|---|
-| `docker-compose.yml` | ✅ Restored | **Was missing in last report** |
-| MongoDB indexes on startup | ✅ Done | **New** — `ensureIndexes()` called from `server.ts`; indexes users, calls, devices |
-| `.env.example` | ✅ Done | Includes `LIVEKIT_PUBLIC_URL`, all FCM/APNs vars |
-| `Dockerfile` | ⚠️ Bug | Lines 17–18 still contain developer SSH key paths (`/c/Users/venkat/.ssh/id_ed25519`). Remove them. |
-| Helm chart templates | ❌ Stubs | Files exist, all content empty |
+| `docker-compose.yml` | ✅ | Present; includes Mongo, Redis, LiveKit |
+| MongoDB indexes on startup | ✅ | |
+| `.env.example` | ✅ | FCM, APNs, `LIVEKIT_PUBLIC_URL` all documented |
+| `Dockerfile` | ⚠️ Bug | Lines 17–18 still contain developer SSH key paths (`/c/Users/venkat/.ssh/id_ed25519`). These are inert at runtime but must be removed before pushing to any image registry. |
+| Helm chart templates | ❌ | Files exist; all content empty |
 
 ---
 
-## Remaining Bugs
+## Open Bugs
 
-### Bug 1 — SSH Key Artifact in Dockerfile (lines 17–18)
-```
-/c/Users/venkat/.ssh/id_ed25519
-ssh-add $env:venkat\.ssh\id_ed25519
-```
-Harmless at runtime but suggests credentials were meant to be baked into the image. Remove before any shared CI or image registry.
+### Bug 1 — Dockerfile SSH Key Artifact *(unchanged)*
+Lines 17–18 of `Dockerfile` contain developer SSH paths left from a previous edit. Remove before any CI pipeline or image push.
 
-### Bug 2 — Health Route Path Mismatch
-`healthRoutes` is registered in `app.ts` without a prefix, so `/live` and `/ready` are at the server root. Standard K8s probes and the spec expect `/health/live` and `/health/ready`.
+### Bug 2 — Health Route Path Mismatch *(unchanged)*
+`GET /live` and `GET /ready` are at the server root. K8s probes and the spec expect `/health/live` and `/health/ready`.
 
-**Fix:** Change `app.register(healthRoutes)` → `app.register(healthRoutes, { prefix: "/health" })`.
+**One-line fix in `app.ts`:** `app.register(healthRoutes)` → `app.register(healthRoutes, { prefix: "/health" })`.
 
-### Bug 3 — Callee Busy Detection Missing
-`POST /calls/initiate` checks if the **caller** is in an active call but not the callees. A user already in a call will receive a second incoming call ring.
+### Bug 3 — Callee Busy Detection Missing *(unchanged)*
+`POST /calls/initiate` checks only whether the **caller** is already in an active call. If a callee is in an active call they still receive the `call:incoming` event.
 
-**Fix:** Loop over `receiverIds` and call `callRepo.getActiveCallForUser(receiverId)` before creating the call record. Return 409 if any callee is busy.
+**Fix:** After the caller-busy check, loop over `receiverIds` and call `callRepo.getActiveCallForUser(receiverId)`. Return 409 if any callee is busy.
 
-### Bug 4 — Dual `signToken` Implementation
-`jwt.ts` defines `signAccessToken` (15 min) and `signRefreshToken` (7 days with `jwtRefreshSecret`). `auth.routes.ts` has its own `signToken` function using `jwtSecret` and does **not** use either of these. The refresh endpoint (`POST /auth/refresh`) validates the access token with `ignoreExpiration: true` — it is not using the separate refresh token infrastructure.
+### Bug 4 — Dual Token-Signing Implementation *(unchanged)*
+`auth.routes.ts` has its own `signToken` function that ignores `jwt.ts`. The `POST /auth/refresh` endpoint re-signs an expired **access** token with `ignoreExpiration: true` — there is no real refresh token, no rotation, and no revocation.
 
-**Fix:** Replace `signToken` in `auth.routes.ts` with `signAccessToken` from `jwt.ts`, and replace the refresh logic with `signRefreshToken` / `verifyRefreshToken`.
+**Fix:** Replace `signToken` in `auth.routes.ts` with `signAccessToken` from `jwt.ts`. Implement a proper refresh token flow using `signRefreshToken` / `verifyRefreshToken`, storing the token hash in MongoDB and clearing it on sign-out.
 
-### Bug 5 — Push Notifications Are Synchronous
-`notifyIncomingCall` is `await`-ed inside `POST /calls/initiate`. A slow or failed FCM/APNs call adds latency to the caller's response. A network timeout to Google's FCM API could block the endpoint for seconds.
+### Bug 5 — Presence Broadcast to All Sockets *(unchanged)*
+`presence.service.ts:64` — the Redis pub/sub subscriber calls `io.emit(event.event, event)`, sending every user's presence change to every connected socket regardless of contact relationship.
 
-**Fix (short-term):** Change to fire-and-forget: `.catch(err => logger.warn(...))` without `await`. **Fix (proper):** Move to BullMQ queue.
-
-### Bug 6 — Presence Not Scoped to Contacts
-Redis pub/sub subscriber emits presence events via `io.emit(event, ...)`, which broadcasts to every connected socket regardless of whether users know each other.
-
-**Fix:** Replace with `io.to(room).emit(...)` where rooms are per-contact-pair, or filter at client subscription time.
+**Fix:** Scope broadcasts to contact-pair Socket.IO rooms, or maintain a per-user subscriber list and emit only to the relevant sockets.
 
 ---
 
-## Recommended Next Steps
+## Priority Action List
 
-### Immediate (before any demo with real devices)
+Work that is blocking or would meaningfully advance the product:
 
-1. Fix Dockerfile SSH artifact (Bug 1)
-2. Fix health route path (Bug 2) — one-line change in `app.ts`
-3. Make push notifications fire-and-forget to unblock caller (Bug 5 short-term)
-4. Wire `jwt.ts` into `auth.routes.ts` to use the proper refresh token path (Bug 4)
-
-### Sprint Continuation
-
-5. **Callee busy detection** — `POST /calls/initiate` guard (Bug 3)
-6. **60-second call timeout** — add a Redis key with TTL on call creation; a BullMQ job or presence worker sweep marks it `missed` and fires `notifyMissedCall`
-7. **`POST /calls/:id/cancel`** — caller cancels before pickup; emits `call:cancelled` to receivers
-8. **Wire reliability utilities** — apply `CircuitBreaker` to LiveKit and push notification calls; apply `withRetry` to FCM; apply `withIdempotency` to `POST /calls/initiate`
-9. **Contacts CRUD** — `GET/POST/DELETE /users/me/contacts`
-10. **Blocklist** — `POST /users/me/block/:id` and wire into call permission checks
-
-### Production Hardening
-
-11. Scope presence to contacts only (Bug 6)
-12. Migrate logger to native Pino (remove custom logger; use Fastify's built-in pino instance everywhere)
-13. Replace custom metrics with `prom-client` for native Prometheus pull
-14. Add OpenTelemetry SDK (`@opentelemetry/sdk-node`) for distributed tracing
-15. Add BullMQ for async push / email jobs
-16. Integration test suite — at minimum cover call lifecycle and presence module
+| Priority | Task | Effort |
+|---|---|---|
+| 🔴 High | Fix health route prefix (Bug 2) — one-line change | Minutes |
+| 🔴 High | Fix callee busy detection (Bug 3) | < 1 hour |
+| 🔴 High | Wire `jwt.ts` refresh token into `auth.routes.ts` (Bug 4) | 1–2 hours |
+| 🔴 High | `POST /calls/:id/cancel` endpoint | 1–2 hours |
+| 🟡 Medium | 60-second auto-missed timeout (BullMQ delayed job or Redis TTL + worker sweep) | Half day |
+| 🟡 Medium | Contacts CRUD (`GET/POST/DELETE /users/me/contacts`) | Half day |
+| 🟡 Medium | Scope presence broadcasts to contacts (Bug 5) | 1–2 hours |
+| 🟡 Medium | Wire `CircuitBreaker` to LiveKit, FCM, APNs calls | 1–2 hours |
+| 🟡 Medium | Wire `withIdempotency` to `POST /calls/initiate` | 1 hour |
+| 🟢 Low | Blocklist (`POST /users/me/block/:id` + call guard) | Half day |
+| 🟢 Low | Remove Dockerfile SSH artifact (Bug 1) | Minutes |
+| 🟢 Low | Migrate logger to native Pino; replace custom logger | 1–2 hours |
+| 🟢 Low | Replace custom metrics with `prom-client` | 1–2 hours |
+| 🟢 Low | Add OpenTelemetry SDK | Half day |
+| 🟢 Low | Expand test coverage (call, presence, user modules) | 1–2 days |
 
 ---
 
-## Architecture Note — Empty Service Files
+## Open Questions for the Team
 
-The following files remain as 1-line empty stubs. Business logic currently lives directly in route handlers, which matches the working code but contradicts the spec's three-layer design:
+1. **Vipin:** No code was merged to `dev` this week. Is the team on a planned break, or is there active work on a feature branch that hasn't landed yet?
 
-- `src/modules/auth/auth.service.ts`
-- `src/modules/auth/auth.repository.ts`
-- `src/modules/auth/auth.types.ts`
-- `src/modules/call/call.service.ts`
-- `src/modules/user/user.service.ts`
-- `src/modules/livekit/livekit.types.ts`
-- `src/config/constants.ts`
+2. **Vipin:** The refresh token infra in `jwt.ts` (`signRefreshToken` / `verifyRefreshToken`) is complete but `auth.routes.ts` doesn't call it. Is this intentional — keeping a single access token — or planned for a future sprint?
 
-The routes-only approach is functionally fine for the current scale. Filling in service files would make unit testing significantly easier and is recommended before the test coverage push.
+3. **Vipin:** The 60-second missed-call timeout is the only remaining Sprint 1 item. Does the team want to use a BullMQ delayed job or a lighter approach (Redis TTL key + worker sweep that already exists in `presence.worker.ts`)?
 
----
+4. **Nishant:** Calls return `url: getLiveKitPublicUrl()` which is now the correct public URL. Please confirm the frontend is consuming this field from the API response and not hardcoding a WebSocket address.
 
-## Open Questions
-
-1. **Vipin:** `auth.routes.ts` still has its own `signToken` function rather than using `signAccessToken` from `jwt.ts`. Is the plan to unify these, or keep them separate? The refresh token path in `jwt.ts` is currently dead code.
-
-2. **Vipin:** Push notifications in `POST /calls/initiate` are `await`-ed synchronously. Before the 60-second timeout feature is added, can they be made fire-and-forget so a slow FCM/APNs response doesn't slow down the caller?
-
-3. **Nishant:** The `url` field in `POST /calls/initiate` and `POST /calls/:id/accept` responses now returns `LIVEKIT_PUBLIC_URL` correctly. Please confirm that the frontend is consuming this field (not hardcoding the LiveKit URL) so the fix takes effect.
-
-4. **All:** Health probes are still at `/live` and `/ready`. If Kubernetes is already configured with `/health/live` probes, the pods are currently failing readiness checks silently. Should we fix the prefix or update the probe config?
+5. **All:** Health probes are still at `/live` and `/ready`. If any K8s or Docker health check config was set up against these paths, the one-line fix in `app.ts` will break those probes. Coordinate before patching.
