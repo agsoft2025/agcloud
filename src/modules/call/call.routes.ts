@@ -378,6 +378,83 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     return reply.send({ message: "Call rejected successfully" });
   });
 
+  // Leave a call (participant disconnects; meeting continues for remaining participants).
+  // Unlike /end, this does NOT end the call for everyone — it only removes the
+  // leaving participant and notifies others via "call:participant-left". The
+  // LiveKit room stays alive until the last participant leaves.
+  app.post("/:id/leave", { preHandler: authenticate }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const userId = request.user!.userId;
+
+    const callRecord = await callRepo.getCallById(id);
+    if (!callRecord) {
+      return reply.status(404).send({ message: "Call not found" });
+    }
+
+    const isAuthorized =
+      callRecord.callerId === userId ||
+      (callRecord.callMode === "conference"
+        ? callRecord.receiverIds.includes(userId)
+        : callRecord.calleeId === userId);
+
+    if (!isAuthorized) {
+      return reply.status(403).send({ message: "You are not authorized to leave this call" });
+    }
+
+    if (callRecord.status === "ended") {
+      return reply.send({ message: "Call already ended" });
+    }
+
+    // Mark the leaving receiver in the participants map.
+    // The callerId has no participants entry, so we only write for receivers.
+    if (userId !== callRecord.callerId) {
+      await callRepo.setParticipantStatus(id, userId, "left");
+    }
+
+    const roomId = callRecord.roomId || id;
+    const leavingUser = await userRepo.getUserById(userId);
+
+    // Re-fetch to get the updated participant statuses after the write above.
+    const updatedCall = await callRepo.getCallById(id);
+    const participants = updatedCall?.participants ?? callRecord.participants ?? {};
+
+    // Build the list of participants who are still actively in the call.
+    // - The callerId is considered "still in" unless they are the one leaving.
+    // - Receivers are "still in" if their status is "joined".
+    const remainingIds: string[] = [];
+    if (userId !== callRecord.callerId) {
+      remainingIds.push(callRecord.callerId);
+    }
+    for (const [pId, participant] of Object.entries(participants)) {
+      if (pId !== userId && participant.status === "joined") {
+        remainingIds.push(pId);
+      }
+    }
+
+    if (remainingIds.length === 0) {
+      // Last participant left — end the call and clean up the LiveKit room.
+      await callRepo.updateCallStatus(id, "ended");
+      await callRepo.markPendingParticipantsAsMissed(id);
+      await endLiveKitRoom(roomId);
+      logger.info({ callId: id, userId }, "Last participant left — call ended");
+    } else {
+      // Others remain — notify them so they can update participant lists.
+      for (const remainingId of remainingIds) {
+        emitToUser(remainingId, "call:participant-left", {
+          callId: id,
+          userId,
+          displayName: leavingUser?.displayName ?? "Unknown",
+        });
+      }
+      logger.info(
+        { callId: id, userId, remaining: remainingIds.length },
+        "Participant left call — meeting continues"
+      );
+    }
+
+    return reply.send({ message: "Left call successfully" });
+  });
+
   // End a call (Hang up)
   app.post("/:id/end", { preHandler: authenticate }, async (request, reply) => {
     const { id } = request.params as { id: string };
