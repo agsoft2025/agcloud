@@ -93,7 +93,7 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       return reply.status(400).send({ message: "You cannot call yourself" });
     }
 
-    // Check if user is already in an active call
+    // Check if the caller is already in an active call
     const activeCall = await callRepo.getActiveCallForUser(callerId);
     if (activeCall) {
       return reply.status(400).send({
@@ -102,10 +102,38 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       });
     }
 
-    // Create call record in MongoDB
+    // Callee-busy check: getActiveCallForUser already matches callerId, calleeId,
+    // AND receiverIds, so it works for any role — just needs to be called per
+    // receiver. Busy receivers are excluded from the invite instead of being
+    // silently rung a second time while already on another call.
+    const busyChecks = await Promise.all(
+      receiverIds.map(async (receiverId) => ({
+        userId: receiverId,
+        activeCall: await callRepo.getActiveCallForUser(receiverId),
+      }))
+    );
+    const busyReceiverIds = busyChecks
+      .filter((check) => check.activeCall !== null)
+      .map((check) => check.userId);
+    const availableReceiverIds = receiverIds.filter(
+      (receiverId) => !busyReceiverIds.includes(receiverId)
+    );
+
+    if (availableReceiverIds.length === 0) {
+      return reply.status(409).send({
+        message:
+          body.callMode === "conference"
+            ? "All invited participants are currently on another call"
+            : "The person you are calling is currently on another call",
+        busyReceiverIds,
+      });
+    }
+
+    // Create call record in MongoDB — only the available (non-busy) receivers
+    // are actually invited/rung.
     const callRecord = await callRepo.createCall(
       callerId,
-      receiverIds,
+      availableReceiverIds,
       body.callType,
       body.callMode,
       body.recording
@@ -115,7 +143,7 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     // Generate token for the caller
     const token = await createLiveKitToken(callerId, roomId);
 
-    // Notify all receivers in real time so they see an incoming call popup
+    // Notify all available receivers in real time so they see an incoming call popup
     const caller = await userRepo.getUserById(callerId);
     const callId = callRecord._id.toString();
     const incomingCallPayload = {
@@ -129,7 +157,7 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       reinvite: false,
     };
 
-    for (const receiverId of receiverIds) {
+    for (const receiverId of availableReceiverIds) {
       emitToUser(receiverId, "call:incoming", incomingCallPayload);
       notifyIncomingCall(receiverId, {
         callId,
@@ -147,6 +175,9 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       token,
       roomName: roomId,
       url: getLiveKitPublicUrl(),
+      // Included so the caller's client can show "X is busy" for anyone who
+      // was silently dropped from this call instead of being rung.
+      ...(busyReceiverIds.length > 0 ? { busyReceiverIds } : {}),
     });
   });
 
@@ -376,6 +407,83 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     });
 
     return reply.send({ message: "Call rejected successfully" });
+  });
+
+  // Leave a call (participant disconnects; meeting continues for remaining participants).
+  // Unlike /end, this does NOT end the call for everyone — it only removes the
+  // leaving participant and notifies others via "call:participant-left". The
+  // LiveKit room stays alive until the last participant leaves.
+  app.post("/:id/leave", { preHandler: authenticate }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const userId = request.user!.userId;
+
+    const callRecord = await callRepo.getCallById(id);
+    if (!callRecord) {
+      return reply.status(404).send({ message: "Call not found" });
+    }
+
+    const isAuthorized =
+      callRecord.callerId === userId ||
+      (callRecord.callMode === "conference"
+        ? callRecord.receiverIds.includes(userId)
+        : callRecord.calleeId === userId);
+
+    if (!isAuthorized) {
+      return reply.status(403).send({ message: "You are not authorized to leave this call" });
+    }
+
+    if (callRecord.status === "ended") {
+      return reply.send({ message: "Call already ended" });
+    }
+
+    // Mark the leaving receiver in the participants map.
+    // The callerId has no participants entry, so we only write for receivers.
+    if (userId !== callRecord.callerId) {
+      await callRepo.setParticipantStatus(id, userId, "left");
+    }
+
+    const roomId = callRecord.roomId || id;
+    const leavingUser = await userRepo.getUserById(userId);
+
+    // Re-fetch to get the updated participant statuses after the write above.
+    const updatedCall = await callRepo.getCallById(id);
+    const participants = updatedCall?.participants ?? callRecord.participants ?? {};
+
+    // Build the list of participants who are still actively in the call.
+    // - The callerId is considered "still in" unless they are the one leaving.
+    // - Receivers are "still in" if their status is "joined".
+    const remainingIds: string[] = [];
+    if (userId !== callRecord.callerId) {
+      remainingIds.push(callRecord.callerId);
+    }
+    for (const [pId, participant] of Object.entries(participants)) {
+      if (pId !== userId && participant.status === "joined") {
+        remainingIds.push(pId);
+      }
+    }
+
+    if (remainingIds.length === 0) {
+      // Last participant left — end the call and clean up the LiveKit room.
+      await callRepo.updateCallStatus(id, "ended");
+      await callRepo.markPendingParticipantsAsMissed(id);
+      await endLiveKitRoom(roomId);
+      logger.info({ callId: id, userId }, "Last participant left — call ended");
+    } else {
+      // Others remain — notify them so they can update participant lists.
+      for (const remainingId of remainingIds) {
+        emitToUser(remainingId, "call:participant-left", {
+          callId: id,
+          userId,
+          displayName: leavingUser?.displayName ?? "Unknown",
+        });
+      }
+      logger.info(
+        { callId: id, userId, remaining: remainingIds.length },
+        "Participant left call — meeting continues"
+      );
+    }
+
+    return reply.send({ message: "Left call successfully" });
   });
 
   // End a call (Hang up)

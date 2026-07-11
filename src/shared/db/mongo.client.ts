@@ -53,6 +53,23 @@ export async function ensureIndexes(): Promise<void> {
       devices.createIndex({ userId: 1, platform: 1, token: 1 }, { unique: true, name: "device_unique" }),
     ]);
 
+    const refreshTokens = database.collection("refresh_tokens");
+    await Promise.all([
+      refreshTokens.createIndex({ jti: 1 }, { unique: true, name: "jti_unique" }),
+      refreshTokens.createIndex({ familyId: 1 }, { name: "family_lookup" }),
+      refreshTokens.createIndex({ userId: 1, revoked: 1 }, { name: "user_active_sessions" }),
+      // TTL index — Mongo automatically deletes rotated-away/expired refresh
+      // tokens once their expiresAt passes, so the collection doesn't grow
+      // unbounded with dead rotation history.
+      refreshTokens.createIndex({ expiresAt: 1 }, { name: "ttl_expiry", expireAfterSeconds: 0 }),
+    ]);
+
+    const auditLogs = database.collection("audit_logs");
+    await Promise.all([
+      auditLogs.createIndex({ userId: 1, createdAt: -1 }, { name: "user_history" }),
+      auditLogs.createIndex({ event: 1, createdAt: -1 }, { name: "event_history" }),
+    ]);
+
     logger.info("MongoDB indexes ensured");
   } catch (err) {
     logger.warn({ err }, "MongoDB index creation failed (non-fatal)");
