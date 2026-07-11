@@ -49,6 +49,12 @@ export async function buildApp() {
     logger: {
       level: config.logLevel,
     },
+    // The rate limiter and audit logger both need the real client IP, not the
+    // reverse proxy's. This app already assumes an `x-forwarded-for`-aware
+    // proxy in front of it (see rate-limit.middleware.ts's keyGenerator), so
+    // trusting that header here is consistent with the existing deployment
+    // assumption rather than a new one.
+    trustProxy: true,
   });
 
   // Security headers

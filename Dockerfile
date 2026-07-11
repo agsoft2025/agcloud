@@ -13,6 +13,3 @@ RUN pnpm build
 
 EXPOSE 3000
 CMD ["pnpm", "start"]
-
- /c/Users/venkat/.ssh/id_ed25519
- ssh-add $env:venkat\.ssh\id_ed25519

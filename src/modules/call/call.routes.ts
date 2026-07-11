@@ -93,7 +93,7 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       return reply.status(400).send({ message: "You cannot call yourself" });
     }
 
-    // Check if user is already in an active call
+    // Check if the caller is already in an active call
     const activeCall = await callRepo.getActiveCallForUser(callerId);
     if (activeCall) {
       return reply.status(400).send({
@@ -102,10 +102,38 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       });
     }
 
-    // Create call record in MongoDB
+    // Callee-busy check: getActiveCallForUser already matches callerId, calleeId,
+    // AND receiverIds, so it works for any role — just needs to be called per
+    // receiver. Busy receivers are excluded from the invite instead of being
+    // silently rung a second time while already on another call.
+    const busyChecks = await Promise.all(
+      receiverIds.map(async (receiverId) => ({
+        userId: receiverId,
+        activeCall: await callRepo.getActiveCallForUser(receiverId),
+      }))
+    );
+    const busyReceiverIds = busyChecks
+      .filter((check) => check.activeCall !== null)
+      .map((check) => check.userId);
+    const availableReceiverIds = receiverIds.filter(
+      (receiverId) => !busyReceiverIds.includes(receiverId)
+    );
+
+    if (availableReceiverIds.length === 0) {
+      return reply.status(409).send({
+        message:
+          body.callMode === "conference"
+            ? "All invited participants are currently on another call"
+            : "The person you are calling is currently on another call",
+        busyReceiverIds,
+      });
+    }
+
+    // Create call record in MongoDB — only the available (non-busy) receivers
+    // are actually invited/rung.
     const callRecord = await callRepo.createCall(
       callerId,
-      receiverIds,
+      availableReceiverIds,
       body.callType,
       body.callMode,
       body.recording
@@ -115,7 +143,7 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     // Generate token for the caller
     const token = await createLiveKitToken(callerId, roomId);
 
-    // Notify all receivers in real time so they see an incoming call popup
+    // Notify all available receivers in real time so they see an incoming call popup
     const caller = await userRepo.getUserById(callerId);
     const callId = callRecord._id.toString();
     const incomingCallPayload = {
@@ -129,7 +157,7 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       reinvite: false,
     };
 
-    for (const receiverId of receiverIds) {
+    for (const receiverId of availableReceiverIds) {
       emitToUser(receiverId, "call:incoming", incomingCallPayload);
       notifyIncomingCall(receiverId, {
         callId,
@@ -147,6 +175,9 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       token,
       roomName: roomId,
       url: getLiveKitPublicUrl(),
+      // Included so the caller's client can show "X is busy" for anyone who
+      // was silently dropped from this call instead of being rung.
+      ...(busyReceiverIds.length > 0 ? { busyReceiverIds } : {}),
     });
   });
 

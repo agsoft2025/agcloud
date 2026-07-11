@@ -15,6 +15,12 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(32),
   JWT_REFRESH_SECRET: z.string().min(32).optional(),
   JWT_ACCESS_TOKEN_EXPIRES_IN: z.string().default("15m"),
+  // Sliding per-token lifetime: each rotation extends the refresh token by this many days.
+  REFRESH_TOKEN_TTL_DAYS: z.string().default("7").transform(Number),
+  // Absolute cap on a login session's lifetime, measured from first issuance,
+  // regardless of how many times it has been rotated. Forces re-authentication
+  // even for a continuously-active session.
+  REFRESH_TOKEN_FAMILY_MAX_AGE_DAYS: z.string().default("30").transform(Number),
   FRONTEND_URL: z
     .string()
     .default("http://localhost:5173")
@@ -44,6 +50,8 @@ const config = {
   jwtSecret: envVars.JWT_SECRET,
   jwtRefreshSecret: envVars.JWT_REFRESH_SECRET ?? envVars.JWT_SECRET,
   jwtAccessTokenExpiresIn: envVars.JWT_ACCESS_TOKEN_EXPIRES_IN,
+  refreshTokenTtlDays: envVars.REFRESH_TOKEN_TTL_DAYS,
+  refreshTokenFamilyMaxAgeDays: envVars.REFRESH_TOKEN_FAMILY_MAX_AGE_DAYS,
   frontendUrl: envVars.FRONTEND_URL,
   logLevel: envVars.LOG_LEVEL,
 };
