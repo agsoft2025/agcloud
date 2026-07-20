@@ -1,5 +1,6 @@
 import logger from "../../shared/observability/logger.js";
 import { pushNotificationsFailed, pushNotificationsSent } from "../../shared/observability/metrics.js";
+import { withRetry } from "../../shared/utils/retry.js";
 
 export interface FcmMessage {
   token: string;
@@ -9,6 +10,17 @@ export interface FcmMessage {
   priority?: "high" | "normal";
   ttl?: number;
 }
+
+export interface FcmSendResult {
+  ok: boolean;
+  /** True when FCM reports the token itself is dead (UNREGISTERED/NOT_FOUND) — caller should stop retrying and unregister the device. */
+  permanentFailure?: boolean;
+}
+
+/** Thrown for FCM errors that will never succeed on retry — a dead/invalid registration token. */
+class FcmPermanentError extends Error {}
+
+const PERMANENT_FCM_ERROR_CODES = new Set(["UNREGISTERED", "NOT_FOUND", "INVALID_ARGUMENT"]);
 
 let _accessToken: string | null = null;
 let _tokenExpiresAt = 0;
@@ -56,44 +68,58 @@ async function getAccessToken(): Promise<string> {
   return _accessToken;
 }
 
-export async function sendFcmNotification(message: FcmMessage): Promise<boolean> {
+async function sendOnce(projectId: string, message: FcmMessage): Promise<void> {
+  const token = await getAccessToken();
+  const body = {
+    message: {
+      token: message.token,
+      notification: { title: message.title, body: message.body },
+      data: message.data ?? {},
+      android: {
+        priority: message.priority === "high" ? "HIGH" : "NORMAL",
+        ...(message.ttl !== undefined && { ttl: `${message.ttl}s` }),
+      },
+    },
+  };
+
+  const res = await fetch(`https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const fcmError = await res.json().catch(() => ({}) as any);
+    const errorCode = fcmError?.error?.status as string | undefined;
+    logger.error({ fcmError, status: res.status }, "FCM send failed");
+
+    if (errorCode && PERMANENT_FCM_ERROR_CODES.has(errorCode)) {
+      throw new FcmPermanentError(errorCode);
+    }
+    throw new Error(`FCM send failed with status ${res.status}`);
+  }
+}
+
+export async function sendFcmNotification(message: FcmMessage): Promise<FcmSendResult> {
   const projectId = process.env.FCM_PROJECT_ID;
   if (!projectId) {
     logger.warn("FCM_PROJECT_ID not set - skipping push");
-    return false;
+    return { ok: false };
   }
 
   try {
-    const token = await getAccessToken();
-    const body = {
-      message: {
-        token: message.token,
-        notification: { title: message.title, body: message.body },
-        data: message.data ?? {},
-        android: {
-          priority: message.priority === "high" ? "HIGH" : "NORMAL",
-          ...(message.ttl !== undefined && { ttl: `${message.ttl}s` }),
-        },
-      },
-    };
-
-    const res = await fetch(`https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+    await withRetry(() => sendOnce(projectId, message), {
+      maxAttempts: 3,
+      retryOn: (err) => !(err instanceof FcmPermanentError),
     });
-
-    if (!res.ok) {
-      logger.error({ fcmError: await res.json().catch(() => ({})) }, "FCM send failed");
-      pushNotificationsFailed.inc({ platform: "fcm" });
-      return false;
-    }
-
     pushNotificationsSent.inc({ platform: "fcm" });
-    return true;
+    return { ok: true };
   } catch (err) {
-    logger.error({ err }, "FCM send exception");
     pushNotificationsFailed.inc({ platform: "fcm" });
-    return false;
+    if (err instanceof FcmPermanentError) {
+      return { ok: false, permanentFailure: true };
+    }
+    logger.error({ err }, "FCM send exception");
+    return { ok: false };
   }
 }

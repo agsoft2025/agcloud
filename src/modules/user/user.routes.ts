@@ -4,6 +4,8 @@ import { UserDocument } from "./user.schemas.js";
 import { authenticate } from "../../shared/middleware/auth.middleware.js";
 import { activityMiddleware } from "../../shared/middleware/activity.middleware.js";
 import { getPresenceForUser, presenceRepo, computeStatus } from "../presence/presence.service.js";
+import { ContactRepository } from "../contact/contact.repository.js";
+import { BlockRepository } from "../contact/block.repository.js";
 import { ObjectId } from "mongodb";
 import { connectMongo } from "../../shared/db/mongo.client.js";
 import { z } from "zod";
@@ -42,8 +44,12 @@ const updateProfileSchema = z.object({
   avatarUrl: z.string().optional(),
 });
 
+const userIdParamSchema = z.object({ id: z.string().min(1) });
+
 const userRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   const userRepo = new UserRepository();
+  const contactRepo = new ContactRepository();
+  const blockRepo = new BlockRepository();
   const db = await connectMongo();
   const usersCollection = db.collection<UserDocument>("users");
 
@@ -175,6 +181,111 @@ const userRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       console.error(error);
       return reply.status(500).send({ message: "Internal server error" });
     }
+  });
+
+  // GET /users/me/contacts — the caller's own contact list, enriched with live presence
+  app.get("/me/contacts", { preHandler: [authenticate, activityMiddleware] }, async (request, reply) => {
+    const ownerId = request.user!.userId;
+    const contactIds = await contactRepo.listContactIds(ownerId);
+
+    const users = (
+      await Promise.all(contactIds.map((id) => userRepo.getUserById(id)))
+    ).filter((u): u is UserDocument => u !== null);
+
+    const userIds = users.map((u) => u._id.toString());
+    const [presenceMap, socketCountMap] = await Promise.all([
+      presenceRepo.batchGetPresence(userIds),
+      presenceRepo.batchGetSocketCounts(userIds),
+    ]);
+
+    return reply.send({
+      contacts: users.map((u) => {
+        const id = u._id.toString();
+        const presence = presenceMap.get(id);
+        const sockets = socketCountMap.get(id) ?? 0;
+        const live = presence ? computeStatus(presence, sockets) : null;
+        return toContact(u, live);
+      }),
+    });
+  });
+
+  // POST /users/me/contacts — add a contact by user ID
+  app.post("/me/contacts", { preHandler: [authenticate, activityMiddleware] }, async (request, reply) => {
+    const ownerId = request.user!.userId;
+    const body = z.object({ userId: z.string().min(1) }).parse(request.body);
+
+    if (body.userId === ownerId) {
+      return reply.status(400).send({ message: "You cannot add yourself as a contact" });
+    }
+
+    const targetUser = await userRepo.getUserById(body.userId);
+    if (!targetUser) {
+      return reply.status(404).send({ message: "User not found" });
+    }
+
+    await contactRepo.addContact(ownerId, body.userId);
+    return reply.status(201).send({ message: "Contact added successfully" });
+  });
+
+  // DELETE /users/me/contacts/:id — remove a contact
+  app.delete("/me/contacts/:id", { preHandler: [authenticate, activityMiddleware] }, async (request, reply) => {
+    const ownerId = request.user!.userId;
+    const { id } = userIdParamSchema.parse(request.params);
+
+    const removed = await contactRepo.removeContact(ownerId, id);
+    if (!removed) {
+      return reply.status(404).send({ message: "Contact not found" });
+    }
+    return reply.send({ message: "Contact removed successfully" });
+  });
+
+  // GET /users/me/blocked — list of users the caller has blocked
+  app.get("/me/blocked", { preHandler: [authenticate, activityMiddleware] }, async (request, reply) => {
+    const blockerId = request.user!.userId;
+    const blockedIds = await blockRepo.listBlockedIds(blockerId);
+
+    const users = (
+      await Promise.all(blockedIds.map((id) => userRepo.getUserById(id)))
+    ).filter((u): u is UserDocument => u !== null);
+
+    return reply.send({
+      blocked: users.map((u) => ({
+        id: u._id.toString(),
+        email: u.email,
+        displayName: u.displayName,
+        avatarUrl: u.avatarUrl ?? null,
+      })),
+    });
+  });
+
+  // POST /users/me/block/:id — block a user (also guards call initiation)
+  app.post("/me/block/:id", { preHandler: [authenticate, activityMiddleware] }, async (request, reply) => {
+    const blockerId = request.user!.userId;
+    const { id } = userIdParamSchema.parse(request.params);
+
+    if (id === blockerId) {
+      return reply.status(400).send({ message: "You cannot block yourself" });
+    }
+
+    const targetUser = await userRepo.getUserById(id);
+    if (!targetUser) {
+      return reply.status(404).send({ message: "User not found" });
+    }
+
+    await blockRepo.block(blockerId, id);
+    return reply.status(201).send({ message: "User blocked successfully" });
+  });
+
+  // DELETE /users/me/block/:id — unblock a user
+  app.delete("/me/block/:id", { preHandler: [authenticate, activityMiddleware] }, async (request, reply) => {
+    const blockerId = request.user!.userId;
+    const { id } = userIdParamSchema.parse(request.params);
+
+    const removed = await blockRepo.unblock(blockerId, id);
+    if (!removed) {
+      return reply.status(404).send({ message: "Block not found" });
+    }
+    return reply.send({ message: "User unblocked successfully" });
   });
 
   // GET /users/:id — single user profile with live presence

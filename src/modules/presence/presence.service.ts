@@ -14,6 +14,7 @@
 import type { Server as SocketIOServer } from "socket.io";
 import { getRedisClient } from "../../shared/db/redis.client.js";
 import { UserRepository } from "../user/user.repository.js";
+import { ContactRepository } from "../contact/contact.repository.js";
 import {
   PresenceRepository,
   BROADCAST_CHANNEL,
@@ -26,6 +27,7 @@ import type {
 
 const presenceRepo = new PresenceRepository();
 const userRepo     = new UserRepository();
+const contactRepo  = new ContactRepository();
 let   io: SocketIOServer | null = null;
 
 // ---- Thresholds ----
@@ -61,7 +63,7 @@ function _setupSubscriber(): void {
   sub.on("message", (_channel: string, raw: string) => {
     try {
       const event = JSON.parse(raw) as PresenceBroadcast;
-      if (io) io.emit(event.event, event);
+      void _deliverToWatchers(event);
     } catch (err) {
       console.error("[presence] malformed broadcast message:", err);
     }
@@ -72,6 +74,26 @@ function _setupSubscriber(): void {
 
 async function _broadcast(event: PresenceBroadcast): Promise<void> {
   await presenceRepo.publish(BROADCAST_CHANNEL, JSON.stringify(event));
+}
+
+/**
+ * Deliver a presence event only to sockets that should see it: the user's
+ * own other devices (multi-device sync) plus anyone who has this user saved
+ * as a contact. Replaces the old behavior of broadcasting to every connected
+ * socket regardless of whether the two users know each other.
+ */
+async function _deliverToWatchers(event: PresenceBroadcast): Promise<void> {
+  if (!io) return;
+
+  try {
+    const watcherIds = await contactRepo.getWatchersOf(event.userId);
+    io.to("user:" + event.userId).emit(event.event, event);
+    for (const watcherId of watcherIds) {
+      io.to("user:" + watcherId).emit(event.event, event);
+    }
+  } catch (err) {
+    console.error("[presence] failed to resolve contact watchers for", event.userId, err);
+  }
 }
 
 // ---- Status computation ----

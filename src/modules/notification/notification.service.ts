@@ -41,6 +41,12 @@ export async function unregisterDevice(userId: string, token: string): Promise<v
   await col.deleteOne({ userId, token });
 }
 
+/** Clear a dead VoIP token without deleting the device's primary (alert) token registration. */
+export async function clearVoipToken(userId: string, voipToken: string): Promise<void> {
+  const col = await getDevicesCollection();
+  await col.updateOne({ userId, voipToken }, { $unset: { voipToken: "" } });
+}
+
 async function getDevicesForUser(userId: string): Promise<DeviceDocument[]> {
   const col = await getDevicesCollection();
   return col.find({ userId }).toArray();
@@ -79,13 +85,14 @@ export async function notifyIncomingCall(userId: string, payload: IncomingCallPa
     roomId: payload.roomId,
   };
 
-  await Promise.allSettled(
-    devices.map((device) => {
+  const results = await Promise.allSettled(
+    devices.map(async (device) => {
       if (device.platform === "ios") {
         if (device.voipToken) {
-          return sendVoipPush(device.voipToken, { ...data, "content-available": 1 });
+          const result = await sendVoipPush(device.voipToken, { ...data, "content-available": 1 });
+          return { device, token: device.voipToken, isVoip: true, result };
         }
-        return sendApnsNotification({
+        const result = await sendApnsNotification({
           deviceToken: device.token,
           pushType: "alert",
           priority: 10,
@@ -96,8 +103,9 @@ export async function notifyIncomingCall(userId: string, payload: IncomingCallPa
           },
           data,
         });
+        return { device, token: device.token, isVoip: false, result };
       }
-      return sendFcmNotification({
+      const result = await sendFcmNotification({
         token: device.token,
         title: "Incoming Call",
         body: `${payload.callerName} is calling`,
@@ -105,8 +113,32 @@ export async function notifyIncomingCall(userId: string, payload: IncomingCallPa
         priority: "high",
         ttl: 60,
       });
+      return { device, token: device.token, isVoip: false, result };
     })
   );
+
+  await pruneDeadDevices(results);
+}
+
+/** Stop retrying tokens FCM/APNs reported as permanently invalid (UNREGISTERED / 410 Gone). */
+async function pruneDeadDevices(
+  results: PromiseSettledResult<{
+    device: DeviceDocument;
+    token: string;
+    isVoip: boolean;
+    result: { ok: boolean; permanentFailure?: boolean };
+  }>[]
+): Promise<void> {
+  for (const settled of results) {
+    if (settled.status !== "fulfilled") continue;
+    const { device, token, isVoip, result } = settled.value;
+    if (!result.permanentFailure) continue;
+
+    const prune = isVoip ? clearVoipToken(device.userId, token) : unregisterDevice(device.userId, token);
+    await prune.catch((err: unknown) =>
+      logger.warn({ err, userId: device.userId, platform: device.platform, isVoip }, "Failed to prune dead device token")
+    );
+  }
 }
 
 export async function notifyMissedCall(
@@ -127,10 +159,10 @@ export async function notifyMissedCall(
     callerName: payload.callerName,
   };
 
-  await Promise.allSettled(
-    devices.map((device) => {
+  const results = await Promise.allSettled(
+    devices.map(async (device) => {
       if (device.platform === "ios") {
-        return sendApnsNotification({
+        const result = await sendApnsNotification({
           deviceToken: device.token,
           pushType: "alert",
           aps: {
@@ -139,13 +171,17 @@ export async function notifyMissedCall(
           },
           data,
         });
+        return { device, token: device.token, isVoip: false, result };
       }
-      return sendFcmNotification({
+      const result = await sendFcmNotification({
         token: device.token,
         title: "Missed Call",
         body: `You missed a call from ${payload.callerName}`,
         data,
       });
+      return { device, token: device.token, isVoip: false, result };
     })
   );
+
+  await pruneDeadDevices(results);
 }

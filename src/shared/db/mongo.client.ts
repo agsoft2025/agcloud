@@ -70,6 +70,18 @@ export async function ensureIndexes(): Promise<void> {
       auditLogs.createIndex({ event: 1, createdAt: -1 }, { name: "event_history" }),
     ]);
 
+    const contacts = database.collection("contacts");
+    await Promise.all([
+      contacts.createIndex({ ownerId: 1, contactId: 1 }, { unique: true, name: "owner_contact_unique" }),
+      contacts.createIndex({ contactId: 1 }, { name: "contact_watchers" }),
+    ]);
+
+    const blocks = database.collection("blocks");
+    await Promise.all([
+      blocks.createIndex({ blockerId: 1, blockedId: 1 }, { unique: true, name: "blocker_blocked_unique" }),
+      blocks.createIndex({ blockedId: 1 }, { name: "blocked_lookup" }),
+    ]);
+
     logger.info("MongoDB indexes ensured");
   } catch (err) {
     logger.warn({ err }, "MongoDB index creation failed (non-fatal)");

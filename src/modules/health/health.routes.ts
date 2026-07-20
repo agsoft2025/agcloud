@@ -5,6 +5,65 @@ import { getRedisClient } from "../../shared/db/redis.client.js";
 import { checkLiveKitHealth } from "../livekit/livekit.service.js";
 import logger from "../../shared/observability/logger.js";
 
+async function readinessCheck() {
+  const health = {
+    mongodb: false,
+    redis: false,
+    livekit: false
+  };
+
+  try {
+    const db = await connectMongo();
+    const ping = await db.command({ ping: 1 });
+    health.mongodb = !!ping.ok;
+  } catch (e) {
+    logger.error("MongoDB health check failed");
+  }
+
+  try {
+    const redis = getRedisClient();
+    const ping = await redis.ping();
+    health.redis = ping === "PONG";
+  } catch (e) {
+    logger.error("Redis health check failed");
+  }
+
+  try {
+    health.livekit = await checkLiveKitHealth();
+  } catch (e) {
+    logger.error("LiveKit health check failed");
+  }
+
+  return health;
+}
+
+// Liveness/readiness probes, registered under the `/health` prefix per spec
+// (see documents/Backend-Specification.md). Also mounted bare (`/live`,
+// `/ready`) for backward compatibility with any existing monitoring config
+// pointed at the old paths.
+export const healthCheckRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
+  app.get("/live", async () => ({ status: "ok", type: "liveness" }));
+
+  app.get("/ready", async (request, reply) => {
+    const health = await readinessCheck();
+    const isReady = Object.values(health).every(v => v === true);
+
+    if (!isReady) {
+      return reply.status(503).send({
+        status: "unhealthy",
+        type: "readiness",
+        details: health
+      });
+    }
+
+    return {
+      status: "ok",
+      type: "readiness",
+      details: health
+    };
+  });
+};
+
 const healthRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   // Production-grade Dashboard at the Root
   app.get("/", async (request, reply) => {
@@ -180,54 +239,10 @@ const healthRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     `);
   });
 
-  // Health check API routes
-  app.get("/live", async () => ({ status: "ok", type: "liveness" }));
-
-  app.get("/ready", async (request, reply) => {
-    const health = {
-      mongodb: false,
-      redis: false,
-      livekit: false
-    };
-
-    try {
-      const db = await connectMongo();
-      const ping = await db.command({ ping: 1 });
-      health.mongodb = !!ping.ok;
-    } catch (e) {
-      logger.error("MongoDB health check failed");
-    }
-
-    try {
-      const redis = getRedisClient();
-      const ping = await redis.ping();
-      health.redis = ping === "PONG";
-    } catch (e) {
-      logger.error("Redis health check failed");
-    }
-
-    try {
-      health.livekit = await checkLiveKitHealth();
-    } catch (e) {
-      logger.error("LiveKit health check failed");
-    }
-
-    const isReady = Object.values(health).every(v => v === true);
-
-    if (!isReady) {
-      return reply.status(503).send({
-        status: "unhealthy",
-        type: "readiness",
-        details: health
-      });
-    }
-
-    return {
-      status: "ok",
-      type: "readiness",
-      details: health
-    };
-  });
+  // Bare /live and /ready kept for backward compatibility with any existing
+  // monitoring config; the canonical spec paths are /health/live and
+  // /health/ready, registered via `healthCheckRoutes` in app.ts.
+  await app.register(healthCheckRoutes);
 };
 
 export default healthRoutes;

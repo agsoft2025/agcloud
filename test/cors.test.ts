@@ -13,4 +13,9 @@ describe("CORS origin allowlist", () => {
   it("rejects unconfigured public origins", () => {
     expect(isAllowedCorsOrigin("https://example.com")).toBe(false);
   });
+
+  it("allows any localhost port, even one not explicitly configured as the frontend URL", () => {
+    expect(isAllowedCorsOrigin("http://localhost:9999")).toBe(true);
+    expect(isAllowedCorsOrigin("http://127.0.0.1:4321")).toBe(true);
+  });
 });

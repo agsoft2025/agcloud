@@ -69,7 +69,7 @@ export class CallRepository {
 
     if (status === "active") {
       updatePayload.startedAt = new Date();
-    } else if (status === "rejected" || status === "ended") {
+    } else if (status === "rejected" || status === "ended" || status === "cancelled" || status === "missed") {
       updatePayload.endedAt = new Date();
     }
 
@@ -168,8 +168,8 @@ export class CallRepository {
     }
   }
 
-  /** Mark every participant still in "invited" status as "missed" (e.g. when the call ends). */
-  async markPendingParticipantsAsMissed(callId: string): Promise<void> {
+  /** Mark every participant still in "invited" status as `status` (e.g. "missed" when the call ends, "cancelled" when the caller cancels pre-pickup). */
+  async markPendingParticipantsAs(callId: string, status: ParticipantStatus): Promise<void> {
     const collection = await this.getCollection();
     const call = await collection.findOne({ _id: new ObjectId(callId) });
     if (!call?.participants) return;
@@ -177,7 +177,7 @@ export class CallRepository {
     const updates: Record<string, ParticipantStatus> = {};
     for (const [userId, participant] of Object.entries(call.participants)) {
       if (participant.status === "invited") {
-        updates[`participants.${userId}.status`] = "missed";
+        updates[`participants.${userId}.status`] = status;
       }
     }
 
@@ -186,7 +186,7 @@ export class CallRepository {
     try {
       await collection.updateOne({ _id: new ObjectId(callId) }, { $set: updates });
     } catch (error) {
-      console.error(`Error in markPendingParticipantsAsMissed for call "${callId}":`, error);
+      console.error(`Error in markPendingParticipantsAs for call "${callId}":`, error);
     }
   }
 

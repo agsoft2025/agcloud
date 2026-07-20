@@ -1,5 +1,15 @@
 import logger from "../../shared/observability/logger.js";
 import { pushNotificationsFailed, pushNotificationsSent } from "../../shared/observability/metrics.js";
+import { withRetry } from "../../shared/utils/retry.js";
+
+export interface ApnsSendResult {
+  ok: boolean;
+  /** True on HTTP 410 (Gone) — the token is permanently invalid; caller should unregister the device. */
+  permanentFailure?: boolean;
+}
+
+/** Thrown for APNs errors that will never succeed on retry — a dead/unregistered device token. */
+class ApnsPermanentError extends Error {}
 
 export interface ApnsPayload {
   deviceToken: string;
@@ -36,11 +46,41 @@ async function getApnsToken(): Promise<string> {
   return _apnsToken;
 }
 
-export async function sendApnsNotification(payload: ApnsPayload): Promise<boolean> {
+async function sendOnce(host: string, topic: string, pushType: string, payload: ApnsPayload): Promise<void> {
+  const token = await getApnsToken();
+  const body = { aps: payload.aps ?? {}, ...(payload.data ?? {}) };
+
+  const res = await fetch(`${host}/3/device/${payload.deviceToken}`, {
+    method: "POST",
+    headers: {
+      authorization: `bearer ${token}`,
+      "content-type": "application/json",
+      "apns-push-type": pushType,
+      "apns-topic": topic,
+      "apns-priority": String(payload.priority ?? 10),
+      ...(payload.expiration !== undefined && { "apns-expiration": String(payload.expiration) }),
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const apnsError = await res.json().catch(() => ({}) as any);
+    logger.error({ apnsError, status: res.status }, "APNs send failed");
+
+    // 410 Gone = token permanently invalid (device uninstalled the app / token expired).
+    // 400 BadDeviceToken is effectively the same signal for a malformed/stale token.
+    if (res.status === 410 || apnsError?.reason === "BadDeviceToken") {
+      throw new ApnsPermanentError(apnsError?.reason ?? "Gone");
+    }
+    throw new Error(`APNs send failed with status ${res.status}`);
+  }
+}
+
+export async function sendApnsNotification(payload: ApnsPayload): Promise<ApnsSendResult> {
   const bundleId = process.env.APNS_BUNDLE_ID;
   if (!bundleId) {
     logger.warn("APNS_BUNDLE_ID not set - skipping APNs push");
-    return false;
+    return { ok: false };
   }
 
   const isProduction = process.env.APNS_PRODUCTION === "true";
@@ -49,37 +89,22 @@ export async function sendApnsNotification(payload: ApnsPayload): Promise<boolea
   const topic = payload.topic ?? (pushType === "voip" ? `${bundleId}.voip` : bundleId);
 
   try {
-    const token = await getApnsToken();
-    const body = { aps: payload.aps ?? {}, ...(payload.data ?? {}) };
-
-    const res = await fetch(`${host}/3/device/${payload.deviceToken}`, {
-      method: "POST",
-      headers: {
-        authorization: `bearer ${token}`,
-        "content-type": "application/json",
-        "apns-push-type": pushType,
-        "apns-topic": topic,
-        "apns-priority": String(payload.priority ?? 10),
-        ...(payload.expiration !== undefined && { "apns-expiration": String(payload.expiration) }),
-      },
-      body: JSON.stringify(body),
+    await withRetry(() => sendOnce(host, topic, pushType, payload), {
+      maxAttempts: 3,
+      retryOn: (err) => !(err instanceof ApnsPermanentError),
     });
-
-    if (!res.ok) {
-      logger.error({ apnsError: await res.json().catch(() => ({})), status: res.status }, "APNs send failed");
-      pushNotificationsFailed.inc({ platform: "apns" });
-      return false;
-    }
-
     pushNotificationsSent.inc({ platform: "apns" });
-    return true;
+    return { ok: true };
   } catch (err) {
-    logger.error({ err }, "APNs send exception");
     pushNotificationsFailed.inc({ platform: "apns" });
-    return false;
+    if (err instanceof ApnsPermanentError) {
+      return { ok: false, permanentFailure: true };
+    }
+    logger.error({ err }, "APNs send exception");
+    return { ok: false };
   }
 }
 
-export async function sendVoipPush(deviceToken: string, data: Record<string, unknown>): Promise<boolean> {
+export async function sendVoipPush(deviceToken: string, data: Record<string, unknown>): Promise<ApnsSendResult> {
   return sendApnsNotification({ deviceToken, pushType: "voip", priority: 10, expiration: 0, aps: {}, data });
 }

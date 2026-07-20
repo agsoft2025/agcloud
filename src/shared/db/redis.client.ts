@@ -46,3 +46,19 @@ export function getRedisClient(): Redis {
   if (!redis) return connectRedis();
   return redis;
 }
+
+/**
+ * A fresh, standalone ioredis connection for callers that must not share a
+ * connection with the rest of the app (e.g. BullMQ, which issues blocking
+ * commands that would stall pub/sub or other traffic on a shared client).
+ * Each call returns a new connection — callers own its lifecycle (`.quit()`).
+ */
+export function createDedicatedRedisConnection(): Redis {
+  return new Redis(config.redisUrl, {
+    maxRetriesPerRequest: null,
+    retryStrategy(times: number) {
+      if (times > 20) return null;
+      return Math.min(times * 100, 5000);
+    },
+  });
+}

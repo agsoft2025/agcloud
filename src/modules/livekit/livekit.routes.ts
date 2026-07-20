@@ -61,7 +61,7 @@ const livekitRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
           const call = await callRepo.getCallById(roomName);
           if (call && (call.status === "active" || call.status === "initiated")) {
             await callRepo.updateCallStatus(roomName, "ended");
-            await callRepo.markPendingParticipantsAsMissed(roomName);
+            await callRepo.markPendingParticipantsAs(roomName, "missed");
             logger.info({ callId: roomName }, "Call auto-ended via room_finished webhook");
             const allIds = new Set([call.callerId, ...call.receiverIds]);
             for (const id of allIds) {
