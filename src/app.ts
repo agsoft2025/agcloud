@@ -1,11 +1,11 @@
-import Fastify from "fastify";
+import Fastify, { FastifyBaseLogger } from "fastify";
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import helmet from "@fastify/helmet";
 import rawBody from "fastify-raw-body";
 import authRoutes from "./modules/auth/auth.routes.js";
 import callRoutes from "./modules/call/call.routes.js";
-import healthRoutes from "./modules/health/health.routes.js";
+import healthRoutes, { healthCheckRoutes } from "./modules/health/health.routes.js";
 import livekitRoutes from "./modules/livekit/livekit.routes.js";
 import userRoutes from "./modules/user/user.routes.js";
 import notificationRoutes from "./modules/notification/notification.routes.js";
@@ -13,7 +13,7 @@ import { activityMiddleware } from "./shared/middleware/activity.middleware.js";
 import { registerRateLimiting } from "./shared/middleware/rate-limit.middleware.js";
 import { registerRequestId } from "./shared/middleware/request-id.js";
 import { registerErrorHandler } from "./shared/middleware/error-handler.js";
-import { getMetrics, getMetricsContentType } from "./shared/observability/metrics.js";
+import { getMetrics, getMetricsContentType, httpRequestsTotal, httpRequestDuration } from "./shared/observability/metrics.js";
 import logger from "./shared/observability/logger.js";
 import config from "./config/index.js";
 import { fastifyCorsOriginCallback } from "./shared/security/cors.js";
@@ -46,9 +46,14 @@ async function registerFastify4OptionalPlugin(
 
 export async function buildApp() {
   const app = Fastify({
-    logger: {
-      level: config.logLevel,
-    },
+    // Share the app's single pino instance with Fastify (supported since
+    // Fastify v3: pass an existing pino instance directly as `logger`)
+    // instead of letting it spin up its own internal pino — one logging
+    // pipeline, not two. Cast to the interface type (which pino.Logger
+    // structurally satisfies) so Fastify's generics resolve to the default
+    // FastifyBaseLogger instead of pino's concrete branded type — otherwise
+    // every FastifyInstance-typed helper in this file stops type-checking.
+    logger: logger as unknown as FastifyBaseLogger,
     // The rate limiter and audit logger both need the real client IP, not the
     // reverse proxy's. This app already assumes an `x-forwarded-for`-aware
     // proxy in front of it (see rate-limit.middleware.ts's keyGenerator), so
@@ -97,6 +102,17 @@ export async function buildApp() {
   // Global presence activity hook - fires after every authenticated response
   app.addHook("onResponse", activityMiddleware);
 
+  // HTTP request metrics — route pattern (not raw URL) keeps label cardinality bounded.
+  app.addHook("onResponse", async (request, reply) => {
+    const labels = {
+      method: request.method,
+      route: request.routeOptions.url || "unmatched",
+      status_code: String(reply.statusCode),
+    };
+    httpRequestsTotal.inc(labels);
+    httpRequestDuration.observe(labels, reply.elapsedTime / 1000);
+  });
+
   // Prometheus metrics
   app.get("/metrics", async (_request, reply) => {
     reply.header("Content-Type", getMetricsContentType());
@@ -105,6 +121,7 @@ export async function buildApp() {
 
   // Application routes
   await app.register(healthRoutes);
+  await app.register(healthCheckRoutes, { prefix: "/health" });
   await app.register(authRoutes, { prefix: "/auth" });
   await app.register(callRoutes, { prefix: "/calls" });
   await app.register(userRoutes, { prefix: "/users" });

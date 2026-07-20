@@ -7,6 +7,7 @@ export const callStatusSchema = z.enum([
   "rejected",
   "ended",
   "missed",
+  "cancelled",
 ]);
 
 export type CallStatus = z.infer<typeof callStatusSchema>;
@@ -17,6 +18,7 @@ export const participantStatusSchema = z.enum([
   "rejected",
   "left",
   "missed",
+  "cancelled",
 ]);
 
 export type ParticipantStatus = z.infer<typeof participantStatusSchema>;

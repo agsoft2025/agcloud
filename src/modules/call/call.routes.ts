@@ -6,13 +6,18 @@ import { CallStateMachine } from "./call.state-machine.js";
 import { authenticate } from "../../shared/middleware/auth.middleware.js";
 import { emitToUser } from "../realtime/realtime.service.js";
 import { UserRepository } from "../user/user.repository.js";
+import { BlockRepository } from "../contact/block.repository.js";
 import { notifyIncomingCall } from "../notification/notification.service.js";
+import { scheduleCallTimeout, cancelCallTimeout } from "./call.queue.js";
+import { withIdempotency } from "../../shared/utils/idempotency.js";
+import { callsInitiated, callsAccepted, callsRejected, callsEnded } from "../../shared/observability/metrics.js";
 import logger from "../../shared/observability/logger.js";
 import config from "../../config/index.js";
 
 const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   const callRepo = new CallRepository();
   const userRepo = new UserRepository();
+  const blockRepo = new BlockRepository();
 
   // List endpoint for testing in postman
   app.get("/", async (request, reply) => {
@@ -21,6 +26,8 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         "POST /calls/initiate - Initiate a new call",
         "POST /calls/:id/accept - Accept an incoming call",
         "POST /calls/:id/reject - Reject an incoming call",
+        "POST /calls/:id/cancel - Cancel a call before pickup",
+        "POST /calls/:id/leave - Leave an ongoing conference",
         "POST /calls/:id/end - Hang up / end a call",
         "POST /calls/:id/record/start - Start call recording",
         "POST /calls/:id/record/stop - Stop call recording"
@@ -74,8 +81,10 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     });
   });
 
-  // Initiate a new call
-  app.post("/initiate", { preHandler: authenticate }, async (request, reply) => {
+  // Initiate a new call. Idempotency-protected: a client retry/double-tap
+  // that resends the same `Idempotency-Key` header gets the original response
+  // replayed instead of creating a second call record.
+  app.post("/initiate", { preHandler: authenticate }, withIdempotency(async (request, reply) => {
     const body = initCallSchema.parse(request.body);
     const callerId = request.user!.userId;
 
@@ -102,30 +111,42 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       });
     }
 
+    // Blocklist guard: exclude any receiver who has blocked the caller, or
+    // whom the caller has blocked, in either direction.
+    const blockedReceiverIds = await blockRepo.filterBlockedEitherWay(callerId, receiverIds);
+
     // Callee-busy check: getActiveCallForUser already matches callerId, calleeId,
     // AND receiverIds, so it works for any role — just needs to be called per
     // receiver. Busy receivers are excluded from the invite instead of being
     // silently rung a second time while already on another call.
     const busyChecks = await Promise.all(
-      receiverIds.map(async (receiverId) => ({
-        userId: receiverId,
-        activeCall: await callRepo.getActiveCallForUser(receiverId),
-      }))
+      receiverIds
+        .filter((receiverId) => !blockedReceiverIds.includes(receiverId))
+        .map(async (receiverId) => ({
+          userId: receiverId,
+          activeCall: await callRepo.getActiveCallForUser(receiverId),
+        }))
     );
     const busyReceiverIds = busyChecks
       .filter((check) => check.activeCall !== null)
       .map((check) => check.userId);
     const availableReceiverIds = receiverIds.filter(
-      (receiverId) => !busyReceiverIds.includes(receiverId)
+      (receiverId) => !busyReceiverIds.includes(receiverId) && !blockedReceiverIds.includes(receiverId)
     );
 
     if (availableReceiverIds.length === 0) {
-      return reply.status(409).send({
-        message:
-          body.callMode === "conference"
+      const message = blockedReceiverIds.length > 0 && busyReceiverIds.length === 0
+        ? (body.callMode === "conference"
+            ? "All invited participants are unavailable"
+            : "You cannot call this person")
+        : (body.callMode === "conference"
             ? "All invited participants are currently on another call"
-            : "The person you are calling is currently on another call",
+            : "The person you are calling is currently on another call");
+
+      return reply.status(409).send({
+        message,
         busyReceiverIds,
+        ...(blockedReceiverIds.length > 0 ? { blockedReceiverIds } : {}),
       });
     }
 
@@ -146,6 +167,11 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     // Notify all available receivers in real time so they see an incoming call popup
     const caller = await userRepo.getUserById(callerId);
     const callId = callRecord._id.toString();
+
+    // Auto-transition to "missed" if nobody accepts within 60s
+    void scheduleCallTimeout(callId);
+    callsInitiated.inc();
+
     const incomingCallPayload = {
       callId,
       callerId,
@@ -178,8 +204,9 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       // Included so the caller's client can show "X is busy" for anyone who
       // was silently dropped from this call instead of being rung.
       ...(busyReceiverIds.length > 0 ? { busyReceiverIds } : {}),
+      ...(blockedReceiverIds.length > 0 ? { blockedReceiverIds } : {}),
     });
-  });
+  }));
 
   // Add a participant to an ongoing call (converts it into a conference)
   app.post("/:id/add-participant", { preHandler: authenticate }, async (request, reply) => {
@@ -305,6 +332,8 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       // Update status to active
       await callRepo.updateCallStatus(id, "active");
       callRecord.status = "active";
+      void cancelCallTimeout(id);
+      callsAccepted.inc();
     }
 
     // Mark this participant as joined (works for first-time accepts, re-invites,
@@ -400,6 +429,8 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
     await callRepo.updateCallStatus(id, "rejected");
     await callRepo.setParticipantStatus(id, calleeId, "rejected");
+    void cancelCallTimeout(id);
+    callsRejected.inc();
 
     emitToUser(callRecord.callerId, "call:rejected", {
       callId: id,
@@ -407,6 +438,44 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     });
 
     return reply.send({ message: "Call rejected successfully" });
+  });
+
+  // Cancel a call before pickup (caller hangs up while receivers are still
+  // ringing, status still "initiated"). Distinct from /end, which handles a
+  // call that is already active, and from /leave, which handles a single
+  // participant exiting an ongoing conference. Clients must treat
+  // "call:cancelled" differently from "call:ended" — the receivers were
+  // never connected, so there is nothing to tear down on their side beyond
+  // dismissing the incoming-call UI.
+  app.post("/:id/cancel", { preHandler: authenticate }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const userId = request.user!.userId;
+
+    const callRecord = await callRepo.getCallById(id);
+    if (!callRecord) {
+      return reply.status(404).send({ message: "Call not found" });
+    }
+
+    if (callRecord.callerId !== userId) {
+      return reply.status(403).send({ message: "Only the caller can cancel this call" });
+    }
+
+    if (!CallStateMachine.isValidTransition(callRecord.status, "cancelled")) {
+      return reply.status(400).send({
+        message: `Cannot cancel a call with status '${callRecord.status}'`
+      });
+    }
+
+    await callRepo.updateCallStatus(id, "cancelled");
+    await callRepo.markPendingParticipantsAs(id, "cancelled");
+    await cancelCallTimeout(id);
+    await endLiveKitRoom(callRecord.roomId || id);
+
+    for (const receiverId of callRecord.receiverIds) {
+      emitToUser(receiverId, "call:cancelled", { callId: id });
+    }
+
+    return reply.send({ message: "Call cancelled successfully" });
   });
 
   // Leave a call (participant disconnects; meeting continues for remaining participants).
@@ -465,8 +534,9 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     if (remainingIds.length === 0) {
       // Last participant left — end the call and clean up the LiveKit room.
       await callRepo.updateCallStatus(id, "ended");
-      await callRepo.markPendingParticipantsAsMissed(id);
+      await callRepo.markPendingParticipantsAs(id, "missed");
       await endLiveKitRoom(roomId);
+      callsEnded.inc();
       logger.info({ callId: id, userId }, "Last participant left — call ended");
     } else {
       // Others remain — notify them so they can update participant lists.
@@ -517,8 +587,10 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     }
 
     await callRepo.updateCallStatus(id, "ended");
-    await callRepo.markPendingParticipantsAsMissed(id);
+    await callRepo.markPendingParticipantsAs(id, "missed");
+    await cancelCallTimeout(id);
     await endLiveKitRoom(callRecord.roomId || id);
+    callsEnded.inc();
 
     // Notify all other participants that the call has ended (this also clears
     // any pending invitations they may still be showing for this call).

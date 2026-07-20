@@ -22,11 +22,48 @@ import {
   setSocketIOServer,
 } from "../presence/presence.service.js";
 import { socketCorsOriginCallback } from "../../shared/security/cors.js";
+import { getRedisClient } from "../../shared/db/redis.client.js";
+import logger from "../../shared/observability/logger.js";
 
 let io: SocketIOServer | null = null;
 
 const userRepo = new UserRepository();
 const callRepo = new CallRepository();
+
+// Per-IP connection cap: guards against a single client (or small botnet)
+// exhausting server resources by opening unbounded socket connections.
+// Redis-backed so the limit holds across horizontally-scaled instances.
+const CONNECT_LIMIT_PER_WINDOW = 30;
+const CONNECT_LIMIT_WINDOW_SECONDS = 60;
+
+// Per-socket PING throttle: the client is expected to heartbeat every 30s;
+// anything faster than this is either a bug or abuse and is silently dropped
+// rather than hammering Redis/presence on every call.
+const MIN_PING_INTERVAL_MS = 5_000;
+
+function getClientIp(handshake: { headers: Record<string, unknown>; address: string }): string {
+  const forwarded = handshake.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.length > 0) {
+    return forwarded.split(",")[0].trim();
+  }
+  return handshake.address;
+}
+
+async function isConnectRateLimited(ip: string): Promise<boolean> {
+  try {
+    const redis = getRedisClient();
+    const key = `ratelimit:socket:connect:${ip}`;
+    const count = await redis.incr(key);
+    if (count === 1) {
+      await redis.expire(key, CONNECT_LIMIT_WINDOW_SECONDS);
+    }
+    return count > CONNECT_LIMIT_PER_WINDOW;
+  } catch (err) {
+    // Fail open — a Redis outage shouldn't take down realtime connectivity.
+    logger.warn({ err, ip }, "Socket connect rate-limit check failed — failing open");
+    return false;
+  }
+}
 
 /**
  * Parse a raw Cookie header string into a key->value map.
@@ -59,6 +96,19 @@ export function initRealtime(httpServer: HttpServer): SocketIOServer {
   // Wire presence broadcaster to this Socket.IO instance so it can emit
   // to local clients after receiving cross-instance broadcasts from Redis pub/sub.
   setSocketIOServer(io);
+
+  // Per-IP connection rate limit — runs before auth so an abusive client
+  // can't burn handshake attempts even with an invalid/absent token.
+  io.use((socket, next) => {
+    const ip = getClientIp(socket.handshake);
+    isConnectRateLimited(ip).then((limited) => {
+      if (limited) {
+        logger.warn({ ip }, "Socket connection rejected — rate limit exceeded");
+        return next(new Error("Too many connection attempts — try again shortly"));
+      }
+      next();
+    });
+  });
 
   // Auth middleware
   // Priority: explicit auth.token > Authorization header > HttpOnly cookie
@@ -103,7 +153,15 @@ export function initRealtime(httpServer: HttpServer): SocketIOServer {
 
     // PING/PONG heartbeat -- client sends PING every 30s.
     // Server updates ONLY lastHeartbeat, never lastActivity.
+    // Throttled defensively: a misbehaving/abusive client spamming PING
+    // faster than the expected interval gets silently dropped instead of
+    // hammering Redis on every event.
+    let lastPingAt = 0;
     socket.on("PING", () => {
+      const now = Date.now();
+      if (now - lastPingAt < MIN_PING_INTERVAL_MS) return;
+      lastPingAt = now;
+
       void handleHeartbeat(userId);
       socket.emit("PONG", { timestamp: new Date().toISOString() });
     });

@@ -1,23 +1,57 @@
 /**
- * Lightweight request tracing — attaches a unique requestId to every request
- * so correlated logs can be filtered by request.
+ * OpenTelemetry distributed tracing.
  *
- * For full distributed tracing (OpenTelemetry + Jaeger/Tempo), replace this
- * with the @opentelemetry/sdk-node setup and remove this file.
+ * MUST be the first import in the process (see src/index.ts) — auto
+ * instrumentation patches Node's module loader for Fastify/MongoDB/ioredis/
+ * outbound HTTP, so it has to run before those libraries are first
+ * `require`'d anywhere in the dependency graph.
+ *
+ * No-ops unless OTEL_EXPORTER_OTLP_ENDPOINT is set, so local dev/CI without a
+ * collector running doesn't pay any startup cost or spam connection errors.
  */
+import { NodeSDK } from "@opentelemetry/sdk-node";
+import { getNodeAutoInstrumentations } from "@opentelemetry/auto-instrumentations-node";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import { resourceFromAttributes } from "@opentelemetry/resources";
+import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from "@opentelemetry/semantic-conventions";
 
-import { FastifyInstance } from "fastify";
-import { randomUUID } from "crypto";
+const otlpEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
 
-export function registerTracing(app: FastifyInstance): void {
-  app.addHook("onRequest", async (request) => {
-    // Honour an upstream trace-id if provided (e.g. from an API gateway)
-    const incoming =
-      request.headers["x-request-id"] ??
-      request.headers["x-trace-id"] ??
-      randomUUID();
+let sdk: NodeSDK | null = null;
 
-    (request as any).requestId = incoming;
-    request.log = request.log.child({ requestId: incoming });
+if (otlpEndpoint) {
+  sdk = new NodeSDK({
+    resource: resourceFromAttributes({
+      [ATTR_SERVICE_NAME]: "agcloud-backend",
+      [ATTR_SERVICE_VERSION]: process.env.npm_package_version ?? "0.1.0",
+    }),
+    traceExporter: new OTLPTraceExporter({ url: `${otlpEndpoint.replace(/\/$/, "")}/v1/traces` }),
+    // Fastify sits directly on Node's http server, so instrumentation-http
+    // (bundled below) already captures every request/response span —
+    // there's no separate Fastify-specific instrumentation package. Combined
+    // with instrumentation-mongodb and instrumentation-ioredis (also
+    // bundled), this correlates traces across all three of this app's
+    // external dependencies (HTTP in, Mongo, Redis) plus outbound HTTP calls
+    // to LiveKit/FCM/APNs.
+    instrumentations: [
+      getNodeAutoInstrumentations({
+        "@opentelemetry/instrumentation-http": {
+          // The liveness probe fires every few seconds and is noise, not a trace worth keeping.
+          ignoreIncomingRequestHook: (req) =>
+            req.url === "/live" || req.url === "/health/live",
+        },
+        // fs instrumentation is extremely high-volume and rarely useful for an API server.
+        "@opentelemetry/instrumentation-fs": { enabled: false },
+      }),
+    ],
   });
+
+  sdk.start();
+
+  process.on("SIGTERM", () => void sdk?.shutdown().catch(() => {}));
+  process.on("SIGINT", () => void sdk?.shutdown().catch(() => {}));
+
+  console.log("[tracing] OpenTelemetry SDK started, exporting to", otlpEndpoint);
+} else {
+  console.log("[tracing] OTEL_EXPORTER_OTLP_ENDPOINT not set — tracing disabled");
 }

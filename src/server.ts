@@ -8,6 +8,7 @@ import {
   stopPresenceWorker,
   cleanupOnStartup,
 } from "./modules/presence/presence.worker.js";
+import { startCallTimeoutWorker, stopCallTimeoutWorker } from "./modules/call/call.queue.js";
 import logger from "./shared/observability/logger.js";
 
 function serializeError(error: unknown) {
@@ -38,6 +39,7 @@ export async function startServer() {
 
     await cleanupOnStartup();
     startPresenceWorker();
+    startCallTimeoutWorker();
 
     await app.listen({ port: config.port, host: "0.0.0.0" });
     logger.info(
@@ -54,6 +56,7 @@ export async function startServer() {
       process.on(signal, async () => {
         logger.info({ signal }, "Shutting down gracefully");
         stopPresenceWorker();
+        await stopCallTimeoutWorker();
         await redis.quit();
         await app.close();
         process.exit(0);

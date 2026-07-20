@@ -1,10 +1,84 @@
-# agcloud Backend — Development Status Report
+# agcloud Backend — Development Status Report (Update)
 
-**Date:** July 11, 2026
-**Branch reviewed:** `dev` (commit `d142a16`)
+**Date:** July 20, 2026
+**Branch reviewed:** `dev`, working tree **uncommitted** relative to `dev` (last commit `f97cb54`, "StatusReportUpdated11July")
 **Reference spec:** `documents/Backend-Specification.md`
 **Prepared by:** Claude Code
-**Previous report:** July 10, 2026 (commit `4f87837`)
+**Previous report:** July 11, 2026 (below)
+
+---
+
+## Important note on repository state
+
+Two things changed between the last commit and this session that the July 11
+report (preserved below) does not reflect:
+
+1. **A large uncommitted test suite already existed in the working tree
+   before this session started** — 39 test files / 399 passing tests, vs.
+   the `auth.routes.test.ts` + `cors.test.ts` pair that's actually committed
+   on `dev`. That work was never committed. This report's "Testing" number
+   reflects the working tree, not `dev`.
+2. **This session executed the entire Remediation-Plan.md backlog**
+   (Sprints 2–6: call lifecycle correctness, contacts/blocklist, presence
+   privacy, reliability wiring, observability consolidation, and test
+   coverage for all of it), on top of that pre-existing uncommitted state.
+
+**Nothing in this session was committed to git** — everything below,
+including the pre-existing test suite, is sitting in the working tree.
+Run `git status` before committing: there's a lot to review in one pass, and
+splitting it into logical commits (per sprint) is worth doing deliberately
+rather than as one giant commit.
+
+## What changed this session
+
+Every item in the July 11 report's Priority Action List is now done, except
+email delivery for password reset (open question #5, needs a provider
+decision — SendGrid/SES/Resend — before it can be implemented) and Helm
+chart templates (still empty stubs, no spec/requirements given for them).
+
+| Area | Done |
+|---|---|
+| `POST /calls/:id/cancel` | ✅ Pre-pickup cancellation, distinct `call:cancelled` event, new `cancelled` call/participant status |
+| 60s auto-missed timeout | ✅ BullMQ delayed job (`call.queue.ts`), dedicated Redis connection, cancelled on accept/reject/cancel/end |
+| Idempotency on `/calls/initiate` | ✅ `withIdempotency` wired; repeated `Idempotency-Key` replays the cached response |
+| Contacts CRUD | ✅ `GET/POST/DELETE /users/me/contacts` |
+| Blocklist | ✅ `POST/DELETE /users/me/block/:id`, `GET /users/me/blocked`, enforced in `/calls/initiate` (blocked receivers excluded, `blockedReceiverIds` in response) |
+| Presence broadcast scoping (Bug 1) | ✅ Pub/sub subscriber now delivers to the user's own room + contact-watchers' rooms only, not `io.emit()` globally |
+| `CircuitBreaker` on LiveKit | ✅ Wraps `deleteRoom`, egress start/stop, `listRooms` (health check); 5-failure threshold, 30s open duration |
+| `withRetry` on FCM/APNs | ✅ 3 attempts, exponential backoff, skips retry on permanent errors (FCM `UNREGISTERED`/`NOT_FOUND`, APNs 410/`BadDeviceToken`) |
+| Dead-token pruning | ✅ Permanent failures trigger `unregisterDevice` (or `clearVoipToken` for VoIP-only failures) |
+| Socket.IO rate limiting | ✅ Per-IP connect cap (30/min, Redis-backed, fails open), PING throttled to 1 per 5s per socket |
+| Logger → native Pino | ✅ `logger.ts` is now a real `pino()` instance, shared with Fastify via `Fastify({ logger })` — one pipeline, not two |
+| Metrics → `prom-client` | ✅ `metrics.ts` rewritten on `prom-client`; default Node process/GC metrics included; `http_requests_total`/`http_request_duration_seconds` now actually wired via an `onResponse` hook (previously defined but never incremented), as are `calls_initiated/accepted/rejected/ended_total` |
+| OpenTelemetry | ✅ `tracing.ts` now bootstraps `@opentelemetry/sdk-node` with auto-instrumentation (HTTP, MongoDB, ioredis) when `OTEL_EXPORTER_OTLP_ENDPOINT` is set; no-ops otherwise so local dev without a collector isn't affected |
+| Testing | ✅ +76 tests this session (399 → 475) covering every item above, plus a fix for the one thing this session's refactors broke (7 test files depended on old `logger`/`metrics`/`tracing` APIs — rewritten against the new ones, not skipped) |
+| Health route path | ✅ Already fixed as of July 11 |
+
+## Updated module scores
+
+| Module | July 11 | July 20 | Change |
+|---|---|---|---|
+| Auth | 98% | 98% | No change |
+| **Call Lifecycle** | 85% | **97%** | Cancel, timeout, idempotency all wired. Only `GET /admin/calls/active` (Health/Admin, not Call Lifecycle) remains from the spec gaps |
+| **LiveKit Integration** | 90% | **95%** | Circuit breaker wired onto all network calls |
+| **User / Contacts** | 80% | **95%** | Contacts CRUD complete |
+| **Presence** | 90% | **98%** | Contact-scoped broadcasts — the one open bug from July 11 is fixed |
+| **Realtime (Socket.IO)** | 80% | **92%** | Per-IP connect rate limiting + PING throttling |
+| **Push Notifications** | 90% | **97%** | Retry + dead-token pruning wired |
+| Health / Admin | 70% | 70% | No change — `GET /admin/calls/active` still missing |
+| **Security Infrastructure** | 96% | **98%** | Blocklist enforcement now real (was previously the one listed gap) |
+| **Observability** | 60% | **93%** | Pino, prom-client, OpenTelemetry all live; two logging pipelines consolidated to one |
+| **Reliability Utilities** | 65% | **97%** | Circuit breaker, retry, idempotency all wired; BullMQ added and in production use |
+| **Testing** | 15%* | **~90%** | *That 15% was already stale — see note above. 475 tests passing across 44 files as of this session |
+| Infrastructure | 82% | 82% | No change — Helm chart templates still stubs |
+
+## What's still open
+
+- **Email delivery for password reset** — still a dev-only `// TODO: send email`. Needs a provider decision (SendGrid/SES/Resend) before implementation; this is a product/ops decision, not something to guess at.
+- **`GET /admin/calls/active`** — not in this session's scope (wasn't in the Remediation Plan's Sprint 0–6 list; it's a Health/Admin item, not called out as blocking).
+- **Helm chart templates** — still empty stubs; no spec given for what they should contain.
+- **2FA/TOTP** — explicitly out of spec scope per the July 11 report.
+- **OpenTelemetry export target** — wired and functional, but does nothing until `OTEL_EXPORTER_OTLP_ENDPOINT` is set to a real collector (Jaeger/Tempo/etc.) in each environment's config. That's a deployment step, not a code gap.
 
 ---
 
