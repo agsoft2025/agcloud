@@ -1,10 +1,78 @@
 # agcloud Backend — Development Status Report (Update)
 
-**Date:** July 20, 2026
-**Branch reviewed:** `dev`, working tree **uncommitted** relative to `dev` (last commit `f97cb54`, "StatusReportUpdated11July")
+**Date:** July 28, 2026
+**Branch reviewed:** `dev` @ `6ff0a8f` (merge of PR #7 `fix/bug`, July 20, 2026 — clean working tree, nothing uncommitted)
 **Reference spec:** `documents/Backend-Specification.md`
 **Prepared by:** Claude Code
-**Previous report:** July 11, 2026 (below)
+**Previous report:** July 20, 2026 (below)
+
+---
+
+## What changed since July 20
+
+**Nothing.** No commits have landed on `dev` since `6ff0a8f` — the branch has
+been idle for a week. This section exists to confirm, by direct code
+inspection and by actually running the test suite (not by re-reading the
+prior report), that everything the July 20 report described as "done in the
+working tree" is now genuinely committed and still true on disk:
+
+- Spot-checked every claim in the July 20 "What changed this session" table
+  against current source: `pino()` in `logger.ts`, `prom-client` in
+  `metrics.ts`, `@opentelemetry/sdk-node` in `tracing.ts`, `CircuitBreaker`
+  wired into `livekit.service.ts`, `withRetry` in `fcm.client.ts` /
+  `apns.client.ts`, `withIdempotency` wrapping `POST /calls/initiate`,
+  BullMQ `Queue`/`Worker` in `call.queue.ts`, `POST /calls/:id/cancel`,
+  contacts/blocklist routes in `user.routes.ts`, presence broadcasts scoped
+  via `io.to("user:" + id)` instead of `io.emit()`, and Socket.IO per-IP
+  connect capping + PING throttling in `realtime.service.ts`. All present
+  and match the report.
+- Ran `npx vitest run` end-to-end (after `npm install` — see below): **475
+  passed / 475, 44 test files**, matching the July 20 count exactly. Not
+  re-derived from the report — actually executed this session.
+- `npx tsc --noEmit`: clean, no errors.
+- Confirmed the "still open" list from July 20 has not drifted: no
+  `send email` implementation exists yet for password reset (still a
+  dev-only `logger.debug({ resetToken })` in `auth.routes.ts`), no
+  `/admin/calls/active` route anywhere in `src/modules`, no Helm templates,
+  no TOTP/2FA code.
+- The six empty stub files noted since the first report
+  (`auth.service.ts`, `auth.repository.ts`, `call.service.ts`,
+  `user.service.ts`, `livekit.types.ts`, `config/constants.ts`) are still
+  0 bytes. This is a stable architectural pattern at this point — route
+  handlers call repositories directly rather than through a service layer —
+  not a regression or oversight, so it's noted here without a score penalty.
+
+### New findings this session (not in any prior report)
+
+- **`npm ci` fails on a clean checkout.** `package.json` and
+  `package-lock.json` are out of sync (`npm ci` reports missing
+  `@emnapi/core`, `@emnapi/runtime`, `@emnapi/wasi-threads` from the lock
+  file). `npm install` works around it by rewriting the lock file, but any
+  CI pipeline or fresh-clone onboarding step that correctly uses `npm ci`
+  for reproducible installs will fail until someone commits a regenerated
+  `package-lock.json`. Worth a quick fix — `npm install && git add
+  package-lock.json` — since it's a one-line-cause problem with an
+  annoying failure mode for anyone else setting up the repo.
+- **`node_modules` was not present at all** in this checkout — first time
+  the repo has been built in this environment. Not a code issue, just
+  context for why the above lockfile drift hadn't been caught yet.
+- **`npm audit`: 17 vulnerabilities (1 low, 16 high)**, all transitive:
+  - `ws` 8.0.0–8.20.1 (memory exhaustion DoS via tiny fragments) — pulled in
+    by `socket.io-adapter` / `engine.io`. Fixable with `npm audit fix`
+    (non-breaking).
+  - `find-my-way` ≤9.6.0 (HTTP/2 DDoS) — a Fastify 4.x transitive
+    dependency. Fix requires upgrading to `fastify@5`, which is a breaking
+    change and ties directly into the `registerFastify4OptionalPlugin`
+    compatibility shim already present in `app.ts` for plugins that
+    require Fastify 5. Worth planning as a deliberate Fastify 5 migration
+    rather than patching around it.
+  - None of these were introduced this session — they're pre-existing
+    transitive dependency exposure that hadn't been audited in a prior
+    report.
+
+**Net effect on scores below:** no module score changes from July 20 — all
+verified as claimed. The lockfile/audit findings are new action items, not
+regressions in functionality.
 
 ---
 
@@ -79,6 +147,8 @@ chart templates (still empty stubs, no spec/requirements given for them).
 - **Helm chart templates** — still empty stubs; no spec given for what they should contain.
 - **2FA/TOTP** — explicitly out of spec scope per the July 11 report.
 - **OpenTelemetry export target** — wired and functional, but does nothing until `OTEL_EXPORTER_OTLP_ENDPOINT` is set to a real collector (Jaeger/Tempo/etc.) in each environment's config. That's a deployment step, not a code gap.
+- **`package-lock.json` out of sync with `package.json`** — `npm ci` fails on a clean checkout (new finding, July 28). Needs `npm install` run and the regenerated lock file committed.
+- **17 npm audit vulnerabilities (16 high)** — `ws` (fixable non-breaking) and `find-my-way`/Fastify 4.x (needs a planned Fastify 5 migration) (new finding, July 28).
 
 ---
 
