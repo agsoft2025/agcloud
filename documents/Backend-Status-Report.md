@@ -1,10 +1,98 @@
 # agcloud Backend — Development Status Report (Update)
 
-**Date:** July 28, 2026
-**Branch reviewed:** `dev` @ `6ff0a8f` (merge of PR #7 `fix/bug`, July 20, 2026 — clean working tree, nothing uncommitted)
+**Date:** July 29, 2026
+**Branch reviewed:** `dev` @ `8abeed1` ("(fix) test cases added", Vipin — clean working tree, nothing uncommitted)
 **Reference spec:** `documents/Backend-Specification.md`
 **Prepared by:** Claude Code
-**Previous report:** July 20, 2026 (below)
+**Previous report:** July 28, 2026 (below)
+
+---
+
+## What changed since July 28
+
+Two commits landed on `dev`: `d16e0d0` ("StatusDoc Update4", Ajay — doc-only,
+folded the SMTP-email finding into the July 28 section below) and `8abeed1`
+("(fix) test cases added", Vipin, July 29 — a substantial feature commit
+despite the commit message undersizing it). Verified by direct code
+inspection and by actually building and running the project, not by
+re-reading commit messages:
+
+- **`GET /admin/calls/active` now exists** (`src/modules/admin/admin.routes.ts`,
+  registered at `/admin` in `app.ts`). Closes the one Health/Admin gap open
+  since the very first report. Guarded by a new `requireRole("admin")`
+  preHandler (`auth.middleware.ts`) that runs after `authenticate` and fails
+  closed — a token with no `role` claim (i.e. anything issued before this
+  change) is rejected with 403 rather than treated as a default role.
+  `role` is now embedded in the access-token JWT at issuance
+  (`signAccessToken(userId, email, role)`) and in the user document schema,
+  so authorization doesn't need a DB round-trip per request; a role change
+  takes effect on next sign-in/refresh, not instantly — a deliberate
+  trade-off given the ≤15-minute access token TTL, not an oversight. The
+  route itself audit-logs every view (`admin.calls_active.viewed`) since
+  reading live call metadata across all users has no per-user authorization
+  scope, unlike the rest of `/calls/*`.
+- **Helm chart templates are no longer stubs.** `helm/agcloud-backend/`
+  now has a real `Chart.yaml`, `values.yaml` (replicas, resources, HPA,
+  PodDisruptionBudget, non-root/read-only-root securityContext per spec
+  §11.1, an explicit warning in `values.yaml` steering production away from
+  the convenience plaintext-Secret default toward an externally-managed
+  `secretRef`), and templates for deployment/service/ingress/hpa/
+  configmap/secret/serviceaccount/PDB. Closes the last open Infrastructure
+  gap.
+- **Push notification fallback queue** (`notification.queue.ts`, new) — a
+  second BullMQ queue distinct from `call.queue.ts`'s timeout job: when the
+  FCM/APNs circuit breaker is OPEN, the rejected per-device send is
+  enqueued for retry 120s later (giving the breaker's own open-duration
+  time to elapse) instead of being dropped, with failed attempts kept
+  (not purged) in BullMQ's failed set as a dead-letter view per spec §6.3.
+- **Per-user rate limiting on `POST /calls/initiate`** — 10 req/min keyed
+  on `request.user.userId` (via a `preHandler`-stage keyGenerator, so it
+  runs after `authenticate` populates `request.user`), not per-IP, so
+  callers behind a shared IP/NAT don't share one budget. New
+  `DuplicateActiveCallError` in `call.repository.ts` gives this a distinct,
+  typed failure path instead of a generic error.
+- **Real SMTP email delivery confirmed working**, not just present: traced
+  `POST /auth/forgot-password` → `sendPasswordResetEmail` →
+  `email.service.ts` → `SmtpEmailProvider` (`nodemailer.createTransport`,
+  config-gated on `SMTP_HOST`) with a `ConsoleEmailProvider` fallback for
+  local dev/test that's explicitly silenced in production
+  (`config.env === "production"`) with a `logger.warn` instead, so a
+  misconfigured production deployment fails loud in logs rather than
+  silently no-op'ing. `config/index.ts` gained `SMTP_PORT`, `SMTP_SECURE`,
+  `SMTP_FROM` (previously only `SMTP_HOST`/`USER`/`PASSWORD` existed);
+  `Backend-Specification.md`'s env var table was updated to match.
+- **ESLint + Prettier added** (`eslint.config.js`, `.prettierrc.json`,
+  `.prettierignore`) — most of the multi-hundred-line diffs in
+  `call.routes.ts`, `presence.service.ts`, `user.routes.ts` etc. this
+  session are Prettier reformatting (quote style, trailing commas, line
+  wrapping), not logic changes; the actual behavioral diff in each file is
+  much smaller than the line count suggests.
+- **`console.*` calls fully retired from `presence.service.ts`** in favor of
+  the structured `logger` — the last holdout of the pre-Pino logging
+  migration reported as complete on July 20 turns out to have had a few
+  stragglers; those are gone now.
+- **`package-lock.json` regenerated and back in sync** — `npm ci` (not
+  `npm install`) now succeeds cleanly on a fresh checkout. The lockfile
+  drift flagged as a new finding on July 28 is resolved.
+
+### Verification performed this session
+
+- `npm ci`: clean install, no lockfile errors (confirms the fix above).
+- `npx vitest run`: **548 passed / 548, 50 test files** (up from 475/44 on
+  July 20/28 — +73 tests across 6 new files, consistent with the new admin
+  route, push fallback queue, email service, and request-context module).
+- `npx tsc --noEmit`: clean, no errors.
+- `npm audit`: **still 17 vulnerabilities (1 low, 16 high)** — identical
+  to July 28. The `ws` and `find-my-way`/Fastify-4.x findings from the
+  prior report are unchanged; neither was addressed this session and
+  neither is new.
+
+**Net effect on scores below:** Health/Admin 70% → **100%** (`GET
+/admin/calls/active` implemented and RBAC-guarded). Infrastructure 82% →
+**98%** (Helm charts real; only gap left is these are un-deployed templates,
+not yet proven against a live cluster). Push Notifications 97% → **99%**
+(fallback queue closes the last spec §6.4 gap). Everything else unchanged
+from July 28.
 
 ---
 
@@ -146,11 +234,12 @@ chart templates (still empty stubs, no spec/requirements given for them).
 
 ## What's still open
 
-- **Helm chart templates** — still empty stubs; no spec given for what they should contain.
+*(Updated July 29 — Helm charts and the lockfile fix from the July 28 list are now done; see the July 29 section at the top of this report.)*
+
 - **2FA/TOTP** — explicitly out of spec scope per the July 11 report.
 - **OpenTelemetry export target** — wired and functional, but does nothing until `OTEL_EXPORTER_OTLP_ENDPOINT` is set to a real collector (Jaeger/Tempo/etc.) in each environment's config. That's a deployment step, not a code gap.
-- **`package-lock.json` out of sync with `package.json`** — `npm ci` fails on a clean checkout (new finding, July 28). Needs `npm install` run and the regenerated lock file committed.
-- **17 npm audit vulnerabilities (16 high)** — `ws` (fixable non-breaking) and `find-my-way`/Fastify 4.x (needs a planned Fastify 5 migration) (new finding, July 28).
+- **17 npm audit vulnerabilities (16 high), unchanged since July 28** — `ws` (fixable non-breaking via `npm audit fix`) and `find-my-way`/Fastify 4.x (needs a planned Fastify 5 migration, tied to the `registerFastify4OptionalPlugin` shim in `app.ts`).
+- **Helm charts are un-deployed templates** — real content now (deployment/service/ingress/HPA/PDB/secret), but not yet proven against a live cluster; worth a `helm template`/`helm lint` + a real `helm upgrade --install` against a staging cluster before calling this fully closed.
 
 ---
 
