@@ -5,7 +5,17 @@ import { buildTestApp } from "../../helpers/buildTestApp.js";
 import { getFakeDb, resetFakes } from "../../helpers/mockDb.js";
 import { livekitMocks } from "../../helpers/mockLivekit.js";
 import { bullmqMocks, resetBullmqMocks } from "../../helpers/mockBullmq.js";
-import { authHeader, makeCallDoc, makeUserDoc } from "../../helpers/fixtures.js";
+import { authHeader, makeCallDoc, makeUserDoc, makeDeviceDoc } from "../../helpers/fixtures.js";
+import config from "../../../src/config/index.js";
+
+// Spec §10.2 critical scenario: "callee offline (push fallback)". Only the
+// actual network send is mocked — the route handler, notification.service.ts,
+// and device lookup all run for real, so this proves initiate really does
+// wire up a push attempt for every receiver, not just the socket emit.
+vi.mock("../../../src/modules/notification/fcm.client.js", () => ({
+  sendFcmNotification: vi.fn().mockResolvedValue({ ok: true }),
+}));
+import { sendFcmNotification } from "../../../src/modules/notification/fcm.client.js";
 
 describe("Call Routes", () => {
   let app: FastifyInstance;
@@ -17,6 +27,7 @@ describe("Call Routes", () => {
     livekitMocks.deleteRoom.mockResolvedValue(undefined);
     livekitMocks.startRoomCompositeEgress.mockResolvedValue({ egressId: "egress-123" });
     livekitMocks.stopEgress.mockResolvedValue({ egressId: "egress-123" });
+    vi.mocked(sendFcmNotification).mockClear().mockResolvedValue({ ok: true });
     app = await buildTestApp();
   });
 
@@ -42,6 +53,25 @@ describe("Call Routes", () => {
       const body = JSON.parse(response.payload);
       expect(body.message).toBe("Call routes are active");
       expect(Array.isArray(body.endpoints)).toBe(true);
+    });
+  });
+
+  describe("GET /calls/test", () => {
+    it("serves the WebRTC tester page outside production", async () => {
+      const response = await app.inject({ method: "GET", url: "/calls/test" });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["content-type"]).toContain("text/html");
+    });
+
+    it("returns 404 in production (unauthenticated debug tool must not be reachable)", async () => {
+      const original = config.env;
+      (config as any).env = "production";
+      try {
+        const response = await app.inject({ method: "GET", url: "/calls/test" });
+        expect(response.statusCode).toBe(404);
+      } finally {
+        (config as any).env = original;
+      }
     });
   });
 
@@ -92,6 +122,38 @@ describe("Call Routes", () => {
       expect(body.callId).toBe(existing._id.toString());
     });
 
+    it("spec §10.2 'simultaneous initiation': a caller_active unique-index violation (two requests racing past the read check) reports the same 400 as the early check", async () => {
+      const callerId = newId();
+      // The "first" request's call, already committed by the time the
+      // second one's insert is attempted.
+      const winner = await seedCall({ callerId, status: "initiated" });
+      // Simulate the race window: the second request's early
+      // getActiveCallForUser read happened *before* the first request's
+      // insert was visible, so it sees no active call (this one-time
+      // override only affects the first call — the post-error re-fetch
+      // below falls through to the real implementation, which does see
+      // `winner`). The DB-level unique index is what actually catches this
+      // in production; here the insert itself is forced to reject the way
+      // MongoDB would.
+      const { CallRepository } = await import("../../../src/modules/call/call.repository.js");
+      vi.spyOn(CallRepository.prototype, "getActiveCallForUser").mockResolvedValueOnce(null);
+      vi.spyOn(getFakeDb().collection("calls"), "insertOne").mockRejectedValueOnce(
+        Object.assign(new Error("E11000 duplicate key error"), { code: 11000 })
+      );
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/calls/initiate",
+        headers: authHeader(callerId, "caller@example.com"),
+        payload: { calleeId: newId() },
+      });
+
+      expect(response.statusCode).toBe(400);
+      const body = JSON.parse(response.payload);
+      expect(body.message).toBe("You are already in an active call");
+      expect(body.callId).toBe(winner._id.toString());
+    });
+
     it("returns 409 with busyReceiverIds when the only receiver is busy (one-to-one)", async () => {
       const callerId = newId();
       const receiverId = newId();
@@ -120,8 +182,18 @@ describe("Call Routes", () => {
       const receiver1 = newId();
       const receiver2 = newId();
       const someoneElse = newId();
-      await seedCall({ callerId: someoneElse, calleeId: receiver1, receiverIds: [receiver1], status: "initiated" });
-      await seedCall({ callerId: someoneElse, calleeId: receiver2, receiverIds: [receiver2], status: "active" });
+      await seedCall({
+        callerId: someoneElse,
+        calleeId: receiver1,
+        receiverIds: [receiver1],
+        status: "initiated",
+      });
+      await seedCall({
+        callerId: someoneElse,
+        calleeId: receiver2,
+        receiverIds: [receiver2],
+        status: "active",
+      });
 
       const response = await app.inject({
         method: "POST",
@@ -140,7 +212,12 @@ describe("Call Routes", () => {
       const freeReceiver = newId();
       const busyReceiver = newId();
       const someoneElse = newId();
-      await seedCall({ callerId: someoneElse, calleeId: busyReceiver, receiverIds: [busyReceiver], status: "initiated" });
+      await seedCall({
+        callerId: someoneElse,
+        calleeId: busyReceiver,
+        receiverIds: [busyReceiver],
+        status: "initiated",
+      });
 
       const response = await app.inject({
         method: "POST",
@@ -202,7 +279,10 @@ describe("Call Routes", () => {
       const first = await app.inject({
         method: "POST",
         url: "/calls/initiate",
-        headers: { ...authHeader(callerId, "caller@example.com"), "idempotency-key": idempotencyKey },
+        headers: {
+          ...authHeader(callerId, "caller@example.com"),
+          "idempotency-key": idempotencyKey,
+        },
         payload: { calleeId: receiverId },
       });
       expect(first.statusCode).toBe(201);
@@ -210,7 +290,10 @@ describe("Call Routes", () => {
       const second = await app.inject({
         method: "POST",
         url: "/calls/initiate",
-        headers: { ...authHeader(callerId, "caller@example.com"), "idempotency-key": idempotencyKey },
+        headers: {
+          ...authHeader(callerId, "caller@example.com"),
+          "idempotency-key": idempotencyKey,
+        },
         payload: { calleeId: receiverId },
       });
       expect(second.statusCode).toBe(201);
@@ -261,6 +344,68 @@ describe("Call Routes", () => {
       expect(body.blockedReceiverIds).toEqual([blockedReceiver]);
       expect(body.call.receiverIds).toEqual([availableReceiver]);
     });
+
+    it("rate-limits per user (spec §5.4: 10/min) — the 11th request in a minute gets 429", async () => {
+      const callerId = newId();
+      for (let i = 0; i < 10; i++) {
+        const response = await app.inject({
+          method: "POST",
+          url: "/calls/initiate",
+          headers: authHeader(callerId, "caller@example.com"),
+          payload: {}, // invalid payload (400) is fine — still counts against the limit
+        });
+        expect(response.statusCode).not.toBe(429);
+      }
+
+      const eleventh = await app.inject({
+        method: "POST",
+        url: "/calls/initiate",
+        headers: authHeader(callerId, "caller@example.com"),
+        payload: {},
+      });
+      expect(eleventh.statusCode).toBe(429);
+    });
+
+    it("keys the rate limit by user, not by IP — a different user is unaffected", async () => {
+      const callerId = newId();
+      const otherCaller = newId();
+      for (let i = 0; i < 10; i++) {
+        await app.inject({
+          method: "POST",
+          url: "/calls/initiate",
+          headers: authHeader(callerId, "caller@example.com"),
+          payload: {},
+        });
+      }
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/calls/initiate",
+        headers: authHeader(otherCaller, "other@example.com"),
+        payload: {},
+      });
+      expect(response.statusCode).not.toBe(429);
+    });
+
+    it("spec §10.2 'callee offline (push fallback)': initiating a call attempts a push to the receiver's registered device", async () => {
+      const callerId = newId();
+      const receiverId = newId();
+      await getFakeDb()
+        .collection("devices")
+        .insertOne(makeDeviceDoc({ userId: receiverId, platform: "android", token: "receiver-device-tok" }));
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/calls/initiate",
+        headers: authHeader(callerId, "caller@example.com"),
+        payload: { calleeId: receiverId },
+      });
+      expect(response.statusCode).toBe(201);
+
+      expect(sendFcmNotification).toHaveBeenCalledWith(
+        expect.objectContaining({ token: "receiver-device-tok", title: "Incoming Call" })
+      );
+    });
   });
 
   describe("POST /calls/:id/add-participant", () => {
@@ -291,7 +436,12 @@ describe("Call Routes", () => {
     it("returns 400 when call status is not initiated/active", async () => {
       const callerId = newId();
       const receiverId = newId();
-      const call = await seedCall({ callerId, calleeId: receiverId, receiverIds: [receiverId], status: "ended" });
+      const call = await seedCall({
+        callerId,
+        calleeId: receiverId,
+        receiverIds: [receiverId],
+        status: "ended",
+      });
 
       const response = await app.inject({
         method: "POST",
@@ -314,7 +464,9 @@ describe("Call Routes", () => {
         payload: { userId: callerId },
       });
       expect(response.statusCode).toBe(400);
-      expect(JSON.parse(response.payload).message).toBe("User is already a participant in this call");
+      expect(JSON.parse(response.payload).message).toBe(
+        "User is already a participant in this call"
+      );
     });
 
     it("returns 400 when target participant is already joined", async () => {
@@ -360,7 +512,9 @@ describe("Call Routes", () => {
       const callerId = newId();
       const receiverId = newId();
       const targetId = newId();
-      await getFakeDb().collection("users").insertOne(makeUserDoc({ _id: new ObjectId(targetId), displayName: "Target User" }));
+      await getFakeDb()
+        .collection("users")
+        .insertOne(makeUserDoc({ _id: new ObjectId(targetId), displayName: "Target User" }));
       const call = await seedCall({
         callerId,
         calleeId: receiverId,
@@ -441,7 +595,12 @@ describe("Call Routes", () => {
     it("allows the one-to-one calleeId to view the call", async () => {
       const callerId = newId();
       const calleeId = newId();
-      const call = await seedCall({ callerId, calleeId, receiverIds: [calleeId], callMode: "one-to-one" });
+      const call = await seedCall({
+        callerId,
+        calleeId,
+        receiverIds: [calleeId],
+        callMode: "one-to-one",
+      });
 
       const response = await app.inject({
         method: "GET",
@@ -489,7 +648,12 @@ describe("Call Routes", () => {
     it("accepts a call, transitions to active, and returns a token", async () => {
       const callerId = newId();
       const calleeId = newId();
-      const call = await seedCall({ callerId, calleeId, receiverIds: [calleeId], status: "initiated" });
+      const call = await seedCall({
+        callerId,
+        calleeId,
+        receiverIds: [calleeId],
+        status: "initiated",
+      });
 
       const response = await app.inject({
         method: "POST",
@@ -534,7 +698,12 @@ describe("Call Routes", () => {
     it("returns 400 for an invalid one-to-one transition", async () => {
       const callerId = newId();
       const calleeId = newId();
-      const call = await seedCall({ callerId, calleeId, receiverIds: [calleeId], status: "active" });
+      const call = await seedCall({
+        callerId,
+        calleeId,
+        receiverIds: [calleeId],
+        status: "active",
+      });
 
       const response = await app.inject({
         method: "POST",
@@ -547,7 +716,12 @@ describe("Call Routes", () => {
     it("rejects a one-to-one call from initiated", async () => {
       const callerId = newId();
       const calleeId = newId();
-      const call = await seedCall({ callerId, calleeId, receiverIds: [calleeId], status: "initiated" });
+      const call = await seedCall({
+        callerId,
+        calleeId,
+        receiverIds: [calleeId],
+        status: "initiated",
+      });
 
       const response = await app.inject({
         method: "POST",
@@ -574,7 +748,12 @@ describe("Call Routes", () => {
     it("returns 403 when a non-caller tries to cancel", async () => {
       const callerId = newId();
       const receiverId = newId();
-      const call = await seedCall({ callerId, calleeId: receiverId, receiverIds: [receiverId], status: "initiated" });
+      const call = await seedCall({
+        callerId,
+        calleeId: receiverId,
+        receiverIds: [receiverId],
+        status: "initiated",
+      });
 
       const response = await app.inject({
         method: "POST",
@@ -588,7 +767,12 @@ describe("Call Routes", () => {
     it("returns 400 when the call is no longer 'initiated' (already active)", async () => {
       const callerId = newId();
       const receiverId = newId();
-      const call = await seedCall({ callerId, calleeId: receiverId, receiverIds: [receiverId], status: "active" });
+      const call = await seedCall({
+        callerId,
+        calleeId: receiverId,
+        receiverIds: [receiverId],
+        status: "active",
+      });
 
       const response = await app.inject({
         method: "POST",
@@ -606,7 +790,9 @@ describe("Call Routes", () => {
         calleeId: receiverId,
         receiverIds: [receiverId],
         status: "initiated",
-        participants: { [receiverId]: { status: "invited", invitedAt: new Date(), invitedBy: callerId } },
+        participants: {
+          [receiverId]: { status: "invited", invitedAt: new Date(), invitedBy: callerId },
+        },
       });
 
       const response = await app.inject({
@@ -909,7 +1095,9 @@ describe("Call Routes", () => {
         calleeId: otherId,
         receiverIds: [otherId],
         status: "initiated",
-        participants: { [otherId]: { status: "invited", invitedAt: new Date(), invitedBy: userId } },
+        participants: {
+          [otherId]: { status: "invited", invitedAt: new Date(), invitedBy: userId },
+        },
       });
 
       const response = await app.inject({

@@ -1,5 +1,6 @@
 import { FastifyInstance } from "fastify";
 import { randomUUID } from "crypto";
+import { enterRequestContext } from "../observability/request-context.js";
 
 /**
  * Attach a unique request ID to every request.
@@ -15,5 +16,10 @@ export function registerRequestId(app: FastifyInstance): void {
 
     (request as any).requestId = incoming;
     reply.header("X-Request-ID", incoming);
+    // Must run first (registerRequestId is registered before every other
+    // hook in app.ts) so every subsequent hook/handler's log calls — which
+    // all go through the shared `logger` singleton, not `request.log` — pick
+    // this requestId up automatically via logger.ts's pino `mixin`.
+    enterRequestContext({ requestId: incoming });
   });
 }

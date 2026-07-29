@@ -30,7 +30,8 @@ export type AuditEvent =
   | "auth.refresh.family_expired"
   | "auth.session.revoked"
   | "auth.password_reset.requested"
-  | "auth.password_reset.completed";
+  | "auth.password_reset.completed"
+  | "admin.calls_active.viewed";
 
 export interface AuditLogEntry {
   event: AuditEvent;

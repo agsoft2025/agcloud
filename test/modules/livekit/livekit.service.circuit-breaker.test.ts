@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import "../../helpers/mockLivekit.js";
 import { livekitMocks } from "../../helpers/mockLivekit.js";
+import logger from "../../../src/shared/observability/logger.js";
 
 /**
  * livekit.service.ts wraps every LiveKit network call (deleteRoom,
@@ -20,7 +21,7 @@ describe("livekit.service — circuit breaker wiring", () => {
     const { checkLiveKitHealth } = await import("../../../src/modules/livekit/livekit.service.js");
 
     livekitMocks.listRooms.mockRejectedValue(new Error("LiveKit unreachable"));
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => logger);
 
     // failureThreshold is 5 — five failures should trip the breaker to OPEN.
     for (let i = 0; i < 5; i++) {
@@ -38,7 +39,7 @@ describe("livekit.service — circuit breaker wiring", () => {
 
   it("recovering (listRooms succeeding again) does not matter while still OPEN — stays short-circuited", async () => {
     const { checkLiveKitHealth } = await import("../../../src/modules/livekit/livekit.service.js");
-    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(logger, "error").mockImplementation(() => logger);
 
     livekitMocks.listRooms.mockRejectedValue(new Error("LiveKit unreachable"));
     for (let i = 0; i < 5; i++) {

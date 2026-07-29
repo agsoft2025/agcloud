@@ -1,6 +1,27 @@
 import { ObjectId } from "mongodb";
 import { connectMongo } from "../../shared/db/mongo.client.js";
-import { CallDocument, Call, CallStatus, CallParticipant, ParticipantStatus } from "./call.schemas.js";
+import logger from "../../shared/observability/logger.js";
+import {
+  CallDocument,
+  Call,
+  CallStatus,
+  CallParticipant,
+  ParticipantStatus,
+} from "./call.schemas.js";
+
+/**
+ * Thrown by createCall() when the `caller_active` unique index (see
+ * mongo.client.ts) rejects a second concurrent insert for a caller who
+ * already has an active/initiated call — the DB-level backstop for the
+ * "simultaneous initiation" race (spec §10.2), since the earlier
+ * `getActiveCallForUser` read-then-write check alone can't prevent two
+ * requests racing each other.
+ */
+export class DuplicateActiveCallError extends Error {}
+
+function isMongoDuplicateKeyError(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: number }).code === 11000;
+}
 
 export class CallRepository {
   private async getCollection() {
@@ -36,14 +57,21 @@ export class CallRepository {
       createdAt: now,
     };
 
-    const result = await collection.insertOne(newCall as CallDocument);
+    let result;
+    try {
+      result = await collection.insertOne(newCall as CallDocument);
+    } catch (err) {
+      if (isMongoDuplicateKeyError(err)) {
+        throw new DuplicateActiveCallError(
+          `Caller ${callerId} already has an active call (concurrent initiate)`
+        );
+      }
+      throw err;
+    }
     const generatedCallId = result.insertedId.toString();
 
     // Set roomId to the generated MongoDB Call _id string for simplicity and uniqueness
-    await collection.updateOne(
-      { _id: result.insertedId },
-      { $set: { roomId: generatedCallId } }
-    );
+    await collection.updateOne({ _id: result.insertedId }, { $set: { roomId: generatedCallId } });
 
     newCall.roomId = generatedCallId;
 
@@ -58,18 +86,27 @@ export class CallRepository {
     try {
       return await collection.findOne({ _id: new ObjectId(id) });
     } catch (error) {
-      console.error(`Error in getCallById for id "${id}":`, error);
+      logger.error({ err: error, callId: id }, "getCallById failed");
       return null;
     }
   }
 
-  async updateCallStatus(id: string, status: CallStatus, extra?: Partial<CallDocument>): Promise<boolean> {
+  async updateCallStatus(
+    id: string,
+    status: CallStatus,
+    extra?: Partial<CallDocument>
+  ): Promise<boolean> {
     const collection = await this.getCollection();
     const updatePayload: any = { status };
 
     if (status === "active") {
       updatePayload.startedAt = new Date();
-    } else if (status === "rejected" || status === "ended" || status === "cancelled" || status === "missed") {
+    } else if (
+      status === "rejected" ||
+      status === "ended" ||
+      status === "cancelled" ||
+      status === "missed"
+    ) {
       updatePayload.endedAt = new Date();
     }
 
@@ -78,10 +115,7 @@ export class CallRepository {
     }
 
     try {
-      const result = await collection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: updatePayload }
-      );
+      const result = await collection.updateOne({ _id: new ObjectId(id) }, { $set: updatePayload });
       return result.modifiedCount > 0;
     } catch {
       return false;
@@ -92,11 +126,7 @@ export class CallRepository {
     const collection = await this.getCollection();
     return await collection
       .find({
-        $or: [
-          { callerId: userId },
-          { calleeId: userId },
-          { receiverIds: userId },
-        ],
+        $or: [{ callerId: userId }, { calleeId: userId }, { receiverIds: userId }],
       })
       .sort({ createdAt: -1 })
       .limit(limit)
@@ -115,7 +145,7 @@ export class CallRepository {
       );
       return await collection.findOne({ _id: new ObjectId(callId) });
     } catch (error) {
-      console.error(`Error in addParticipant for call "${callId}":`, error);
+      logger.error({ err: error, callId }, "addParticipant failed");
       return null;
     }
   }
@@ -125,7 +155,11 @@ export class CallRepository {
    * needed and (re)sets their participant entry to "invited" so a
    * previously missed/rejected/left user can receive a fresh invitation.
    */
-  async inviteParticipant(callId: string, userId: string, invitedBy: string): Promise<CallDocument | null> {
+  async inviteParticipant(
+    callId: string,
+    userId: string,
+    invitedBy: string
+  ): Promise<CallDocument | null> {
     const collection = await this.getCollection();
     try {
       await collection.updateOne(
@@ -144,12 +178,16 @@ export class CallRepository {
       );
       return await collection.findOne({ _id: new ObjectId(callId) });
     } catch (error) {
-      console.error(`Error in inviteParticipant for call "${callId}":`, error);
+      logger.error({ err: error, callId }, "inviteParticipant failed");
       return null;
     }
   }
 
-  async setParticipantStatus(callId: string, userId: string, status: ParticipantStatus): Promise<boolean> {
+  async setParticipantStatus(
+    callId: string,
+    userId: string,
+    status: ParticipantStatus
+  ): Promise<boolean> {
     const collection = await this.getCollection();
     try {
       const result = await collection.updateOne(
@@ -163,7 +201,7 @@ export class CallRepository {
       );
       return result.modifiedCount > 0;
     } catch (error) {
-      console.error(`Error in setParticipantStatus for call "${callId}":`, error);
+      logger.error({ err: error, callId }, "setParticipantStatus failed");
       return false;
     }
   }
@@ -186,18 +224,14 @@ export class CallRepository {
     try {
       await collection.updateOne({ _id: new ObjectId(callId) }, { $set: updates });
     } catch (error) {
-      console.error(`Error in markPendingParticipantsAs for call "${callId}":`, error);
+      logger.error({ err: error, callId }, "markPendingParticipantsAs failed");
     }
   }
 
   async getActiveCallForUser(userId: string): Promise<CallDocument | null> {
     const collection = await this.getCollection();
     return await collection.findOne({
-      $or: [
-        { callerId: userId },
-        { calleeId: userId },
-        { receiverIds: userId }
-      ],
+      $or: [{ callerId: userId }, { calleeId: userId }, { receiverIds: userId }],
       status: { $in: ["initiated", "active"] },
     });
   }
@@ -213,5 +247,26 @@ export class CallRepository {
         [`participants.${userId}.status`]: { $in: ["invited", "missed"] },
       })
       .toArray();
+  }
+
+  /** Admin view: every call currently ringing or in progress, newest first, paginated. */
+  async getActiveCalls(
+    page: number,
+    limit: number
+  ): Promise<{ calls: CallDocument[]; total: number }> {
+    const collection = await this.getCollection();
+    const filter = { status: { $in: ["initiated", "active"] as CallStatus[] } };
+
+    const [calls, total] = await Promise.all([
+      collection
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .toArray(),
+      collection.countDocuments(filter),
+    ]);
+
+    return { calls, total };
   }
 }

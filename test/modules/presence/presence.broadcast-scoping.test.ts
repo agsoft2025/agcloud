@@ -1,6 +1,9 @@
-import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
-import { getFakeDb, getFakeRedis, resetFakes } from "../../helpers/mockDb.js";
-import { handleConnection, setSocketIOServer } from "../../../src/modules/presence/presence.service.js";
+import { describe, it, expect, beforeAll, beforeEach } from "vitest";
+import { getFakeDb, resetFakes } from "../../helpers/mockDb.js";
+import {
+  handleConnection,
+  setSocketIOServer,
+} from "../../../src/modules/presence/presence.service.js";
 
 /**
  * Regression coverage for the "presence broadcast not scoped to contacts"

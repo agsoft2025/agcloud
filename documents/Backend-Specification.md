@@ -968,8 +968,11 @@ PROMETHEUS_METRICS_ENABLED=true
 
 # Email
 SMTP_HOST=...
+SMTP_PORT=587
 SMTP_USER=...
 SMTP_PASSWORD=...                        # secret
+SMTP_SECURE=false
+SMTP_FROM=no-reply@agcloud.example.com
 ```
 
 ### 9.2 Configuration Validation

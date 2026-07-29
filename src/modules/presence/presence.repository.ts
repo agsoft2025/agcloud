@@ -1,9 +1,10 @@
 import { getRedisClient } from "../../shared/db/redis.client.js";
+import logger from "../../shared/observability/logger.js";
 import type { RedisPresenceData } from "./presence.types.js";
 
 const PRESENCE_KEY = (userId: string) => `presence:user:${userId}`;
-const SOCKETS_KEY  = (userId: string) => `presence:user:${userId}:sockets`;
-const GRACE_KEY    = (userId: string) => `presence:user:${userId}:grace`;
+const SOCKETS_KEY = (userId: string) => `presence:user:${userId}:sockets`;
+const GRACE_KEY = (userId: string) => `presence:user:${userId}:grace`;
 
 export const BROADCAST_CHANNEL = "presence:broadcast";
 
@@ -60,7 +61,13 @@ export class PresenceRepository {
     const userIds: string[] = [];
     let cursor = "0";
     do {
-      const [nextCursor, keys] = await this.redis.scan(cursor, "MATCH", "presence:user:*", "COUNT", "100");
+      const [nextCursor, keys] = await this.redis.scan(
+        cursor,
+        "MATCH",
+        "presence:user:*",
+        "COUNT",
+        "100"
+      );
       cursor = nextCursor;
       for (const key of keys) {
         if (key.endsWith(":sockets") || key.endsWith(":grace")) continue;
@@ -81,19 +88,25 @@ export class PresenceRepository {
     let cursor = "0";
     const keys: string[] = [];
     do {
-      const [nextCursor, batch] = await this.redis.scan(cursor, "MATCH", "presence:user:*:sockets", "COUNT", "100");
+      const [nextCursor, batch] = await this.redis.scan(
+        cursor,
+        "MATCH",
+        "presence:user:*:sockets",
+        "COUNT",
+        "100"
+      );
       cursor = nextCursor;
       keys.push(...batch);
     } while (cursor !== "0");
 
     if (keys.length === 0) {
-      console.log("[presence] no stale socket sets found on startup");
+      logger.info("No stale presence socket sets found on startup");
       return;
     }
     const pipeline = this.redis.pipeline();
     for (const key of keys) pipeline.del(key);
     await pipeline.exec();
-    console.log("[presence] cleared " + keys.length + " stale socket set(s) on startup");
+    logger.info({ count: keys.length }, "Cleared stale presence socket set(s) on startup");
   }
 
   // Batch helpers (used by contact list enrichment)
@@ -127,7 +140,10 @@ export class PresenceRepository {
     if (!results) return map;
     for (let i = 0; i < userIds.length; i++) {
       const [err, data] = results[i] as [Error | null, Record<string, string> | null];
-      map.set(userIds[i], (!err && data && data.status) ? data as unknown as RedisPresenceData : null);
+      map.set(
+        userIds[i],
+        !err && data && data.status ? (data as unknown as RedisPresenceData) : null
+      );
     }
     return map;
   }

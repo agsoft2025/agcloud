@@ -1,6 +1,8 @@
 import logger from "../../shared/observability/logger.js";
 import { pushNotificationsFailed, pushNotificationsSent } from "../../shared/observability/metrics.js";
 import { withRetry } from "../../shared/utils/retry.js";
+import { CircuitBreaker, CircuitOpenError } from "../../shared/utils/circuit-breaker.js";
+import { setCircuitBreakerState } from "../../shared/observability/metrics.js";
 
 export interface FcmMessage {
   token: string;
@@ -15,12 +17,26 @@ export interface FcmSendResult {
   ok: boolean;
   /** True when FCM reports the token itself is dead (UNREGISTERED/NOT_FOUND) — caller should stop retrying and unregister the device. */
   permanentFailure?: boolean;
+  /** True when the FCM circuit breaker is OPEN — caller should fall back to the retry queue instead of dropping the notification. */
+  circuitOpen?: boolean;
 }
 
 /** Thrown for FCM errors that will never succeed on retry — a dead/invalid registration token. */
 class FcmPermanentError extends Error {}
 
 const PERMANENT_FCM_ERROR_CODES = new Set(["UNREGISTERED", "NOT_FOUND", "INVALID_ARGUMENT"]);
+
+// Spec §6.4: 50% failure rate over 60s / 10s timeout / 120s reset. This
+// breaker's simple consecutive-failure count is the same approximation
+// already used for LiveKit (livekit.service.ts) rather than a windowed
+// percentage, since that's what the shared CircuitBreaker utility supports.
+const fcmBreaker = new CircuitBreaker({
+  name: "fcm",
+  failureThreshold: 5,
+  openDurationMs: 120_000,
+  timeout: 10_000,
+  onStateChange: (state) => setCircuitBreakerState("fcm", state),
+});
 
 let _accessToken: string | null = null;
 let _tokenExpiresAt = 0;
@@ -108,16 +124,22 @@ export async function sendFcmNotification(message: FcmMessage): Promise<FcmSendR
   }
 
   try {
-    await withRetry(() => sendOnce(projectId, message), {
-      maxAttempts: 3,
-      retryOn: (err) => !(err instanceof FcmPermanentError),
-    });
+    await fcmBreaker.execute(() =>
+      withRetry(() => sendOnce(projectId, message), {
+        maxAttempts: 5,
+        maxDelayMs: 60_000,
+        retryOn: (err) => !(err instanceof FcmPermanentError),
+      })
+    );
     pushNotificationsSent.inc({ platform: "fcm" });
     return { ok: true };
   } catch (err) {
     pushNotificationsFailed.inc({ platform: "fcm" });
     if (err instanceof FcmPermanentError) {
       return { ok: false, permanentFailure: true };
+    }
+    if (err instanceof CircuitOpenError) {
+      return { ok: false, circuitOpen: true };
     }
     logger.error({ err }, "FCM send exception");
     return { ok: false };

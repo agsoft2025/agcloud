@@ -1,5 +1,10 @@
 import { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastify";
-import { registerSchema, loginSchema, forgotPasswordSchema, resetPasswordSchema } from "./auth.schemas.js";
+import {
+  registerSchema,
+  loginSchema,
+  forgotPasswordSchema,
+  resetPasswordSchema,
+} from "./auth.schemas.js";
 import { userSchema, UserDocument } from "../user/user.schemas.js";
 import config from "../../config/index.js";
 import { z } from "zod";
@@ -20,6 +25,7 @@ import { generateSecureToken, hashToken } from "../../shared/security/crypto.js"
 import { getRedisClient } from "../../shared/db/redis.client.js";
 import { writeAuditLog } from "../../shared/security/audit-log.js";
 import { RefreshTokenRepository } from "./refresh-token.repository.js";
+import { sendPasswordResetEmail } from "../../shared/email/email.service.js";
 import type { DeviceInfo } from "./auth.types.js";
 
 /**
@@ -78,7 +84,10 @@ async function denylistAccessToken(decoded: { jti?: string; exp?: number }): Pro
   try {
     await getRedisClient().set(`denylist:jti:${decoded.jti}`, "1", "EX", remainingSeconds);
   } catch (err) {
-    logger.warn({ err, jti: decoded.jti }, "Failed to denylist access token — it will remain valid until natural expiry");
+    logger.warn(
+      { err, jti: decoded.jti },
+      "Failed to denylist access token — it will remain valid until natural expiry"
+    );
   }
 }
 
@@ -90,14 +99,41 @@ function extractAccessToken(request: FastifyRequest): string | undefined {
 
 function extractRefreshToken(request: FastifyRequest): string | undefined {
   return (
-    ((request.body ?? {}) as { refreshToken?: string }).refreshToken ??
-    request.cookies.refreshToken
+    ((request.body ?? {}) as { refreshToken?: string }).refreshToken ?? request.cookies.refreshToken
   );
 }
 
-// Strict rate limit: 10 requests per 15 minutes per IP
+// Strict rate limit: 10 requests per 15 minutes per IP. Used for endpoints
+// not called out with their own limit in spec §5.4 (currently reset-password).
 const authRateLimitConfig = {
   config: { rateLimit: { max: 10, timeWindow: "15 minutes" } },
+};
+
+// Spec §5.4: signin 5/min per IP, signup 3/min per IP.
+const signinRateLimitConfig = {
+  config: { rateLimit: { max: 5, timeWindow: "1 minute" } },
+};
+const signupRateLimitConfig = {
+  config: { rateLimit: { max: 3, timeWindow: "1 minute" } },
+};
+
+// Spec §5.4: forgot-password is 1 req/5min per EMAIL, not per IP — a shared
+// office/NAT IP must not let one user's requests exhaust another's budget,
+// and a single IP spraying different emails should be caught elsewhere (the
+// global per-IP limit), not conflated with this per-account limit.
+// `hook: "preHandler"` is required so the body has already been parsed by
+// the time the keyGenerator runs (the default `onRequest` hook fires before
+// parsing).
+const forgotPasswordRateLimitConfig = {
+  config: {
+    rateLimit: {
+      max: 1,
+      timeWindow: "5 minutes",
+      hook: "preHandler" as const,
+      keyGenerator: (request: FastifyRequest) =>
+        (request.body as { email?: string } | undefined)?.email ?? request.ip,
+    },
+  },
 };
 
 const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
@@ -166,7 +202,11 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       const { familyId } = request.params as { familyId: string };
       const device = getDeviceInfo(request);
 
-      const revoked = await refreshTokenRepo.revokeFamilyForUser(familyId, userId, "device_revoked");
+      const revoked = await refreshTokenRepo.revokeFamilyForUser(
+        familyId,
+        userId,
+        "device_revoked"
+      );
       if (!revoked) {
         return reply.status(404).send({ message: "Session not found" });
       }
@@ -188,7 +228,7 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   });
 
   // POST /auth/signup
-  app.post("/signup", authRateLimitConfig, async (request, reply) => {
+  app.post("/signup", signupRateLimitConfig, async (request, reply) => {
     try {
       const body = registerSchema.parse(request.body);
       const device = getDeviceInfo(request);
@@ -235,7 +275,7 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   });
 
   // POST /auth/signin
-  app.post("/signin", authRateLimitConfig, async (request, reply) => {
+  app.post("/signin", signinRateLimitConfig, async (request, reply) => {
     try {
       const body = loginSchema.parse(request.body);
       const device = getDeviceInfo(request);
@@ -275,7 +315,7 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       }
 
       const userId = user._id.toString();
-      const accessToken = signAccessToken(userId, user.email);
+      const accessToken = signAccessToken(userId, user.email, user.role);
       const { jti: refreshJti, familyId } = await refreshTokenRepo.createFamily(userId, device);
       const refreshToken = signRefreshToken(userId, refreshJti);
 
@@ -375,7 +415,9 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       }
 
       if (stored.revoked) {
-        return reply.status(401).send({ message: "Session has been revoked. Please sign in again." });
+        return reply
+          .status(401)
+          .send({ message: "Session has been revoked. Please sign in again." });
       }
 
       if (stored.used) {
@@ -390,7 +432,9 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         });
         return reply
           .status(401)
-          .send({ message: "Security alert: this session has been revoked. Please sign in again." });
+          .send({
+            message: "Security alert: this session has been revoked. Please sign in again.",
+          });
       }
 
       const familyAgeMs = Date.now() - stored.familyCreatedAt.getTime();
@@ -415,7 +459,7 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
       const { jti: newJti } = await refreshTokenRepo.rotate(stored);
       const newRefreshToken = signRefreshToken(stored.userId, newJti);
-      const newAccessToken = signAccessToken(stored.userId, user.email);
+      const newAccessToken = signAccessToken(stored.userId, user.email, user.role);
 
       reply.setCookie("token", newAccessToken, cookieOptions(request, "access"));
       reply.setCookie("refreshToken", newRefreshToken, cookieOptions(request, "refresh"));
@@ -487,7 +531,10 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     } catch (error) {
       // Signout must never fail the client-visible flow — log and fall through
       // to clearing cookies regardless.
-      logger.error({ err: error }, "POST /auth/signout encountered an error (cookies still cleared)");
+      logger.error(
+        { err: error },
+        "POST /auth/signout encountered an error (cookies still cleared)"
+      );
     }
 
     reply.clearCookie("token", cookieOptions(request, "access"));
@@ -526,7 +573,9 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       // family is revoked, so those devices lose access within their
       // current access token's remaining lifetime (≤15 minutes) the moment
       // they next try to refresh.
-      return reply.send({ message: "Logged out of all devices. Every active session has been revoked." });
+      return reply.send({
+        message: "Logged out of all devices. Every active session has been revoked.",
+      });
     } catch (error) {
       logger.error({ err: error }, "POST /auth/logout-all failed");
       return reply.status(500).send({ message: "Internal server error" });
@@ -534,7 +583,7 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   });
 
   // POST /auth/forgot-password
-  app.post("/forgot-password", authRateLimitConfig, async (request, reply) => {
+  app.post("/forgot-password", forgotPasswordRateLimitConfig, async (request, reply) => {
     try {
       const { email } = forgotPasswordSchema.parse(request.body);
       const user = await usersCollection.findOne({ email });
@@ -550,10 +599,9 @@ const authRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
           { $set: { resetPasswordToken: resetTokenHash, resetPasswordExpires: expires } }
         );
 
-        // In production: send resetToken via email. In dev: log for Postman testing.
-        if (config.env !== "production") {
-          logger.debug({ email, resetToken }, "[DEV] Password reset token");
-        }
+        // sendPasswordResetEmail never rejects — delivery failures are logged
+        // internally so they can't turn a password-reset request into a 500.
+        await sendPasswordResetEmail(email, resetToken);
 
         await writeAuditLog({
           event: "auth.password_reset.requested",

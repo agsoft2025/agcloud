@@ -137,6 +137,153 @@ describe("LiveKit Webhook Routes", () => {
     expect(updated!.participants["pending-1"].status).toBe("missed");
   });
 
+  it("dedups a redelivered event by id (spec §6.2) — second delivery is a no-op", async () => {
+    const call = await seedCall({ status: "active" });
+    const callId = call._id.toString();
+    const payload = JSON.stringify({ event: "room_finished", room: { name: callId }, id: "evt-dup-1" });
+
+    const first = await app.inject({
+      method: "POST",
+      url: "/livekit/webhook",
+      headers: { "content-type": "application/json" },
+      payload,
+    });
+    expect(first.statusCode).toBe(200);
+    expect(JSON.parse(first.payload)).toEqual({ received: true });
+
+    const second = await app.inject({
+      method: "POST",
+      url: "/livekit/webhook",
+      headers: { "content-type": "application/json" },
+      payload,
+    });
+    expect(second.statusCode).toBe(200);
+    expect(JSON.parse(second.payload)).toEqual({ received: true, duplicate: true });
+
+    // Only the first delivery's write should have happened — the call is
+    // ended, and a second processing pass didn't run into it a second time.
+    const updated = await getFakeDb().collection("calls").findOne({ _id: call._id });
+    expect(updated!.status).toBe("ended");
+  });
+
+  it("processes two different event ids independently (not treated as duplicates of each other)", async () => {
+    const call = await seedCall({ status: "initiated", callerId: "caller-1", receiverIds: ["callee-1"] });
+    const callId = call._id.toString();
+
+    const joined = await app.inject({
+      method: "POST",
+      url: "/livekit/webhook",
+      headers: { "content-type": "application/json" },
+      payload: JSON.stringify({
+        event: "participant_joined",
+        room: { name: callId },
+        participant: { identity: "callee-1" },
+        id: "evt-a",
+      }),
+    });
+    expect(JSON.parse(joined.payload)).toEqual({ received: true });
+
+    const finished = await app.inject({
+      method: "POST",
+      url: "/livekit/webhook",
+      headers: { "content-type": "application/json" },
+      payload: JSON.stringify({ event: "room_finished", room: { name: callId }, id: "evt-b" }),
+    });
+    expect(JSON.parse(finished.payload)).toEqual({ received: true });
+
+    const updated = await getFakeDb().collection("calls").findOne({ _id: call._id });
+    expect(updated!.status).toBe("ended");
+  });
+
+  it("room_started: acknowledges without touching the call record (spec §2.4: log-only)", async () => {
+    const call = await seedCall({ status: "initiated" });
+    const callId = call._id.toString();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/livekit/webhook",
+      headers: { "content-type": "application/json" },
+      payload: JSON.stringify({ event: "room_started", room: { name: callId } }),
+    });
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.payload)).toEqual({ received: true });
+
+    const updated = await getFakeDb().collection("calls").findOne({ _id: call._id });
+    expect(updated!.status).toBe("initiated");
+  });
+
+  it("track_published: acknowledges for an audio track on a known call (relayed live, not persisted)", async () => {
+    const call = await seedCall({ status: "active", callerId: "caller-1", receiverIds: ["callee-1"] });
+    const callId = call._id.toString();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/livekit/webhook",
+      headers: { "content-type": "application/json" },
+      payload: JSON.stringify({
+        event: "track_published",
+        room: { name: callId },
+        participant: { identity: "callee-1" },
+        track: { type: 0 }, // AUDIO
+      }),
+    });
+    expect(response.statusCode).toBe(200);
+
+    const updated = await getFakeDb().collection("calls").findOne({ _id: call._id });
+    expect(updated!.status).toBe("active");
+  });
+
+  it("track_unpublished: acknowledges for a video track", async () => {
+    const call = await seedCall({ status: "active", callerId: "caller-1", receiverIds: ["callee-1"] });
+    const callId = call._id.toString();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/livekit/webhook",
+      headers: { "content-type": "application/json" },
+      payload: JSON.stringify({
+        event: "track_unpublished",
+        room: { name: callId },
+        participant: { identity: "caller-1" },
+        track: { type: 1 }, // VIDEO
+      }),
+    });
+    expect(response.statusCode).toBe(200);
+  });
+
+  it("track_published: is a no-op for a DATA track (not audio/video)", async () => {
+    const call = await seedCall({ status: "active", callerId: "caller-1", receiverIds: ["callee-1"] });
+    const callId = call._id.toString();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/livekit/webhook",
+      headers: { "content-type": "application/json" },
+      payload: JSON.stringify({
+        event: "track_published",
+        room: { name: callId },
+        participant: { identity: "callee-1" },
+        track: { type: 2 }, // DATA
+      }),
+    });
+    expect(response.statusCode).toBe(200);
+  });
+
+  it("track_published: is a no-op when the call doesn't exist", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/livekit/webhook",
+      headers: { "content-type": "application/json" },
+      payload: JSON.stringify({
+        event: "track_published",
+        room: { name: "no-such-call" },
+        participant: { identity: "someone" },
+        track: { type: 0 },
+      }),
+    });
+    expect(response.statusCode).toBe(200);
+  });
+
   it("room_finished: leaves a call already ended untouched", async () => {
     const call = await seedCall({ status: "ended" });
     const callId = call._id.toString();

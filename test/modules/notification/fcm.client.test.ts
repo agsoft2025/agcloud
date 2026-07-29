@@ -97,6 +97,32 @@ describe("fcm.client", () => {
       expect(result).toEqual({ ok: false });
     });
 
+    it("opens the circuit breaker after repeated failures and fast-fails with circuitOpen", async () => {
+      (fetch as unknown as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: "at-1", expires_in: 3600 }) })
+        .mockResolvedValue({
+          ok: false,
+          status: 404,
+          json: async () => ({ error: { status: "UNREGISTERED" } }),
+        });
+
+      const { sendFcmNotification } = await import("../../../src/modules/notification/fcm.client.js");
+
+      // failureThreshold: 5 — each of these is a single-attempt permanent
+      // failure (no retry), so this stays fast.
+      for (let i = 0; i < 5; i++) {
+        const result = await sendFcmNotification({ token: `tok-${i}`, title: "Hi", body: "there" });
+        expect(result).toEqual({ ok: false, permanentFailure: true });
+      }
+
+      const callsBeforeOpen = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
+
+      const result = await sendFcmNotification({ token: "tok-blocked", title: "Hi", body: "there" });
+      expect(result).toEqual({ ok: false, circuitOpen: true });
+      // Breaker rejected before calling fn at all — no new fetch calls.
+      expect((fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsBeforeOpen);
+    });
+
     it("returns { ok: false } when the OAuth exchange fails", async () => {
       (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
         ok: false,

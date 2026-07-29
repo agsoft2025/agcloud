@@ -24,45 +24,69 @@ export const httpRequestDuration = new client.Histogram({
   registers: [register],
 });
 
+export const httpRequestsInFlight = new client.Gauge({
+  name: "http_requests_in_flight",
+  help: "HTTP requests currently being processed",
+  registers: [register],
+});
+
+// Spec §7.2: 0=closed, 1=open, 2=half-open. Set from CircuitBreaker's
+// onStateChange hook (see circuit-breaker.ts) for each of livekit/fcm/apns —
+// kept here (not in circuit-breaker.ts) so that generic utility doesn't
+// depend on prom-client.
+export const circuitBreakerState = new client.Gauge({
+  name: "agcloud_circuit_breaker_state",
+  help: "Circuit breaker state per dependency (0=closed, 1=open, 2=half-open)",
+  labelNames: ["dependency"] as const,
+  registers: [register],
+});
+
+const CIRCUIT_STATE_VALUE = { CLOSED: 0, OPEN: 1, HALF_OPEN: 2 } as const;
+
+export function setCircuitBreakerState(dependency: string, state: keyof typeof CIRCUIT_STATE_VALUE): void {
+  circuitBreakerState.set({ dependency }, CIRCUIT_STATE_VALUE[state]);
+}
+
+// Spec §7.2 names every business metric with an `agcloud_` prefix.
 export const callsInitiated = new client.Counter({
-  name: "calls_initiated_total",
+  name: "agcloud_calls_initiated_total",
   help: "Total calls initiated",
   registers: [register],
 });
 
 export const callsAccepted = new client.Counter({
-  name: "calls_accepted_total",
+  name: "agcloud_calls_accepted_total",
   help: "Total calls accepted",
   registers: [register],
 });
 
 export const callsRejected = new client.Counter({
-  name: "calls_rejected_total",
+  name: "agcloud_calls_rejected_total",
   help: "Total calls rejected",
   registers: [register],
 });
 
 export const callsEnded = new client.Counter({
-  name: "calls_ended_total",
+  name: "agcloud_calls_ended_total",
   help: "Total calls ended",
   registers: [register],
 });
 
 export const callsMissed = new client.Counter({
-  name: "calls_missed_total",
+  name: "agcloud_calls_missed_total",
   help: "Total missed calls",
   registers: [register],
 });
 
 export const pushNotificationsSent = new client.Counter({
-  name: "push_notifications_sent_total",
+  name: "agcloud_push_notifications_sent_total",
   help: "Push notifications sent",
   labelNames: ["platform"] as const,
   registers: [register],
 });
 
 export const pushNotificationsFailed = new client.Counter({
-  name: "push_notifications_failed_total",
+  name: "agcloud_push_notifications_failed_total",
   help: "Push notification failures",
   labelNames: ["platform"] as const,
   registers: [register],

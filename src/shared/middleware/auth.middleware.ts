@@ -3,10 +3,12 @@ import jwt from "jsonwebtoken";
 import config from "../../config/index.js";
 import { getRedisClient } from "../db/redis.client.js";
 import logger from "../observability/logger.js";
+import { setRequestContextField } from "../observability/request-context.js";
 
 export interface UserPayload {
   userId: string;
   email: string;
+  role?: string;
   jti?: string;
 }
 
@@ -55,7 +57,29 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
     }
 
     request.user = decoded;
-  } catch (error) {
+    // Spec §7.1: userId is a required field on every log entry once known.
+    // logger.ts's pino `mixin` reads it back off this same context.
+    setRequestContextField("userId", decoded.userId);
+  } catch {
     return reply.status(401).send({ message: "Invalid or expired token" });
   }
+}
+
+/**
+ * Role-based access control. Must run after `authenticate` (relies on
+ * `request.user` already being populated) — register both as an array:
+ * `{ preHandler: [authenticate, requireRole("admin")] }`.
+ *
+ * Tokens issued before the `role` claim existed carry no `role`, so an
+ * absent role is treated as "no access" (fail closed) rather than silently
+ * defaulting to the least-privileged "user" role — a request with no role
+ * information should never pass an elevated-privilege check.
+ */
+export function requireRole(...allowedRoles: string[]) {
+  return async function (request: FastifyRequest, reply: FastifyReply) {
+    const role = request.user?.role;
+    if (!role || !allowedRoles.includes(role)) {
+      return reply.status(403).send({ message: "Insufficient permissions" });
+    }
+  };
 }

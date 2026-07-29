@@ -33,6 +33,12 @@ const envSchema = z.object({
   APNS_PRIVATE_KEY: z.string().optional(),
   APNS_BUNDLE_ID: z.string().optional(),
   APNS_PRODUCTION: z.string().optional(),
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: z.string().default("587").transform(Number),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASSWORD: z.string().optional(),
+  SMTP_SECURE: z.string().optional(),
+  SMTP_FROM: z.string().default("no-reply@agcloud.example.com"),
   LOG_LEVEL: z.string().default("info"),
 });
 
@@ -53,6 +59,12 @@ const config = {
   refreshTokenTtlDays: envVars.REFRESH_TOKEN_TTL_DAYS,
   refreshTokenFamilyMaxAgeDays: envVars.REFRESH_TOKEN_FAMILY_MAX_AGE_DAYS,
   frontendUrl: envVars.FRONTEND_URL,
+  smtpHost: envVars.SMTP_HOST,
+  smtpPort: envVars.SMTP_PORT,
+  smtpUser: envVars.SMTP_USER,
+  smtpPassword: envVars.SMTP_PASSWORD,
+  smtpSecure: envVars.SMTP_SECURE === "true",
+  smtpFrom: envVars.SMTP_FROM,
   logLevel: envVars.LOG_LEVEL,
 };
 

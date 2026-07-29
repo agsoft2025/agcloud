@@ -3,6 +3,7 @@ import { WebhookReceiver } from "livekit-server-sdk";
 import { CallRepository } from "../call/call.repository.js";
 import { endLiveKitRoom } from "./livekit.service.js";
 import { emitToUser } from "../realtime/realtime.service.js";
+import { isFirstDeliveryOfEvent } from "../../shared/utils/idempotency.js";
 import config from "../../config/index.js";
 import logger from "../../shared/observability/logger.js";
 
@@ -53,6 +54,51 @@ const livekitRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       }
 
       logger.info({ eventType: event.event }, "LiveKit webhook received");
+
+      // Spec §6.2: webhook providers redeliver on timeout/5xx — dedup by the
+      // event's own id so a redelivery can't double-process (e.g. two
+      // `call:ended` emits racing a concurrent redelivery before the first
+      // one's DB write lands).
+      if (event.id) {
+        const isFirstDelivery = await isFirstDeliveryOfEvent(event.id);
+        if (!isFirstDelivery) {
+          logger.debug({ eventId: event.id, eventType: event.event }, "Duplicate LiveKit webhook delivery — skipped");
+          return reply.send({ received: true, duplicate: true });
+        }
+      }
+
+      // room_started: spec §2.4 just calls for logging it — the call record
+      // itself is already created synchronously in POST /calls/initiate, so
+      // there's no state to update here.
+      if (event.event === "room_started") {
+        logger.info({ roomName: event.room?.name }, "LiveKit room started");
+      }
+
+      // track_published / track_unpublished: relay as a lightweight realtime
+      // signal so clients can show mute/camera-off indicators for other
+      // participants (spec §2.4: "for audio-only/video toggles"). Not
+      // persisted — this is live UI state, not call history.
+      if (event.event === "track_published" || event.event === "track_unpublished") {
+        const roomName = event.room?.name;
+        const participantId = event.participant?.identity;
+        const trackType = event.track?.type; // 0=AUDIO, 1=VIDEO, 2=DATA
+        if (roomName && participantId && trackType !== undefined && trackType !== 2) {
+          const call = await callRepo.getCallById(roomName);
+          if (call) {
+            const eventName =
+              event.event === "track_published" ? "call:track-published" : "call:track-unpublished";
+            const payload = {
+              callId: roomName,
+              participantId,
+              trackType: trackType === 0 ? "audio" : "video",
+            };
+            const allIds = new Set([call.callerId, ...call.receiverIds]);
+            for (const id of allIds) {
+              if (id !== participantId) emitToUser(id, eventName, payload);
+            }
+          }
+        }
+      }
 
       // room_finished: mark call as ended
       if (event.event === "room_finished") {

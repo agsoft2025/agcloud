@@ -1,0 +1,177 @@
+# Default values for agcloud-backend.
+# Overrides go in a per-environment file, e.g.:
+#   helm upgrade --install agcloud-backend . -f values-staging.yaml
+#
+# SECRETS WARNING: the `secrets:` block below is a convenience default for
+# local/staging use (Helm renders it into a plain Kubernetes Secret — base64,
+# NOT encrypted at rest by itself). For production, prefer not populating
+# `secrets.*` here at all and instead point `secretRef` (below) at a Secret
+# managed by External Secrets Operator, Vault, or your cloud secret manager
+# (see documents/Backend-Specification.md §5.6) — set `secrets.create: false`
+# and `secretRef: your-externally-managed-secret-name`.
+
+replicaCount: 2
+
+image:
+  repository: REPLACE_ME/agcloud-backend # e.g. ghcr.io/your-org/agcloud-backend
+  pullPolicy: IfNotPresent
+  # Defaults to Chart.appVersion when unset — override per release with
+  # `--set image.tag=<git-sha-or-semver>` (spec §11.5 Release Process).
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+# Spec §11.1: non-root user, read-only root filesystem, capabilities dropped.
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+# Fastify needs somewhere writable for tmp files even with a read-only
+# rootfs; mounted by deployment.yaml when securityContext.readOnlyRootFilesystem is true.
+emptyDirTmp:
+  enabled: true
+  sizeLimit: 64Mi
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3000
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: api.agcloud.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Spec §11.2: Resource Limits (Kubernetes).
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# Optional — spec doesn't mandate a PDB, but it's the natural complement to
+# the rolling-update strategy below (maxUnavailable: 0) for real HA.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Spec §11.4 Deployment Strategy: rolling update, maxSurge 25%, maxUnavailable 0.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 25%
+    maxUnavailable: 0
+
+# Spec §11.3 Probes — paths/timings copied verbatim.
+probes:
+  liveness:
+    path: /health/live
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    path: /health/ready
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    failureThreshold: 2
+  startup:
+    path: /health/live
+    failureThreshold: 30
+    periodSeconds: 10
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Spread replicas across nodes/zones instead of letting the scheduler stack
+# them — a single-node failure shouldn't be able to take out every pod at
+# once given spec's 99.9% availability SLO (§7.6).
+topologySpreadConstraints:
+  enabled: true
+  maxSkew: 1
+  topologyKey: kubernetes.io/hostname
+  whenUnsatisfiable: ScheduleAnyway
+
+# ---------------------------------------------------------------------------
+# Application configuration
+# ---------------------------------------------------------------------------
+
+# Non-secret env vars, rendered into a ConfigMap (configmap.yaml). Matches
+# .env.example. Anything commented out there and not secret-shaped can be
+# added here the same way.
+env:
+  NODE_ENV: production
+  PORT: "3000"
+  LOG_LEVEL: info
+  JWT_ACCESS_TOKEN_EXPIRES_IN: 15m
+  REFRESH_TOKEN_TTL_DAYS: "7"
+  REFRESH_TOKEN_FAMILY_MAX_AGE_DAYS: "30"
+  FRONTEND_URL: "https://app.agcloud.example.com"
+  LIVEKIT_URL: ""
+  LIVEKIT_PUBLIC_URL: ""
+  APNS_BUNDLE_ID: ""
+  APNS_PRODUCTION: "true"
+  SMTP_PORT: "587"
+  SMTP_SECURE: "false"
+  SMTP_FROM: "no-reply@agcloud.example.com"
+  # Leave unset (default) to disable tracing entirely — no collector, no
+  # startup cost. Set to enable OpenTelemetry export (spec §7.3).
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+
+# Secret-shaped env vars. See the SECRETS WARNING at the top of this file.
+# Leave secrets.create: true + fill these in only for local/staging use via
+# a git-ignored values-secret.yaml passed with -f; never commit real values.
+secrets:
+  create: true
+  data:
+    MONGO_URI: ""
+    REDIS_URL: ""
+    LIVEKIT_API_KEY: ""
+    LIVEKIT_API_SECRET: ""
+    JWT_SECRET: ""
+    JWT_REFRESH_SECRET: ""
+    FCM_PROJECT_ID: ""
+    FCM_CLIENT_EMAIL: ""
+    FCM_PRIVATE_KEY: ""
+    APNS_KEY_ID: ""
+    APNS_TEAM_ID: ""
+    APNS_PRIVATE_KEY: ""
+    SMTP_USER: ""
+    SMTP_PASSWORD: ""
+# Name of an externally-managed Secret to use instead of the one this chart
+# would otherwise create — set secrets.create: false when using this.
+secretRef: ""

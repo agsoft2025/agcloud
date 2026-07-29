@@ -9,20 +9,21 @@ import {
 import { randomUUID } from "crypto";
 
 describe("access tokens", () => {
-  it("round-trips userId, email, type, and a jti", () => {
-    const token = signAccessToken("user-1", "user@example.com");
+  it("round-trips userId, email, role, type, and a jti", () => {
+    const token = signAccessToken("user-1", "user@example.com", "user");
     const payload = verifyAccessToken(token);
 
     expect(payload.userId).toBe("user-1");
     expect(payload.email).toBe("user@example.com");
+    expect(payload.role).toBe("user");
     expect(payload.type).toBe("access");
     expect(typeof payload.jti).toBe("string");
     expect(payload.jti.length).toBeGreaterThan(0);
   });
 
   it("generates a unique jti for each signed token", () => {
-    const p1 = verifyAccessToken(signAccessToken("user-1", "user@example.com"));
-    const p2 = verifyAccessToken(signAccessToken("user-1", "user@example.com"));
+    const p1 = verifyAccessToken(signAccessToken("user-1", "user@example.com", "user"));
+    const p2 = verifyAccessToken(signAccessToken("user-1", "user@example.com", "user"));
     expect(p1.jti).not.toBe(p2.jti);
   });
 
@@ -31,7 +32,7 @@ describe("access tokens", () => {
   });
 
   it("throws on a tampered token", () => {
-    const token = signAccessToken("user-1", "user@example.com");
+    const token = signAccessToken("user-1", "user@example.com", "user");
     const tampered = token.slice(0, -2) + (token.slice(-2) === "aa" ? "bb" : "aa");
     expect(() => verifyAccessToken(tampered)).toThrow();
   });
@@ -69,7 +70,7 @@ describe("refresh tokens", () => {
 
 describe("decodeAccessTokenUnsafe", () => {
   it("returns the payload object for a valid access token", () => {
-    const token = signAccessToken("user-3", "user3@example.com");
+    const token = signAccessToken("user-3", "user3@example.com", "user");
     const decoded = decodeAccessTokenUnsafe(token);
 
     expect(decoded).not.toBeNull();

@@ -18,25 +18,32 @@ import {
 } from "./presence.service.js";
 import { UserRepository } from "../user/user.repository.js";
 import { BROADCAST_CHANNEL } from "./presence.repository.js";
+import logger from "../../shared/observability/logger.js";
 
 const userRepo = new UserRepository();
 
-const WORKER_INTERVAL_MS  = 60_000;
+const WORKER_INTERVAL_MS = 60_000;
 const DB_SYNC_INTERVAL_MS = 5 * 60_000;
 
 let workerTimer: ReturnType<typeof setInterval> | null = null;
 let dbSyncTimer: ReturnType<typeof setInterval> | null = null;
 
 export function startPresenceWorker(): void {
-  console.log("[presence-worker] starting");
+  logger.info("Presence worker starting");
   workerTimer = setInterval(() => void runEvaluation(), WORKER_INTERVAL_MS);
   dbSyncTimer = setInterval(() => void syncAllToDatabase(), DB_SYNC_INTERVAL_MS);
 }
 
 export function stopPresenceWorker(): void {
-  if (workerTimer) { clearInterval(workerTimer); workerTimer = null; }
-  if (dbSyncTimer) { clearInterval(dbSyncTimer); dbSyncTimer = null; }
-  console.log("[presence-worker] stopped");
+  if (workerTimer) {
+    clearInterval(workerTimer);
+    workerTimer = null;
+  }
+  if (dbSyncTimer) {
+    clearInterval(dbSyncTimer);
+    dbSyncTimer = null;
+  }
+  logger.info("Presence worker stopped");
 }
 
 /**
@@ -52,14 +59,14 @@ export function stopPresenceWorker(): void {
  *  3. Sync the results to MongoDB so the DB reflects reality immediately.
  */
 export async function cleanupOnStartup(): Promise<void> {
-  console.log("[presence-worker] running startup cleanup...");
+  logger.info("Presence worker running startup cleanup");
   try {
     await presenceRepo.clearAllSocketSets();
     await runEvaluation();
     await syncAllToDatabase();
-    console.log("[presence-worker] startup cleanup complete");
+    logger.info("Presence worker startup cleanup complete");
   } catch (err) {
-    console.error("[presence-worker] startup cleanup error:", err);
+    logger.error({ err }, "Presence worker startup cleanup error");
   }
 }
 
@@ -69,7 +76,7 @@ async function runEvaluation(): Promise<void> {
     if (userIds.length === 0) return;
     await Promise.allSettled(userIds.map(evaluateUser));
   } catch (err) {
-    console.error("[presence-worker] evaluation error:", err);
+    logger.error({ err }, "Presence worker evaluation error");
   }
 }
 
@@ -82,16 +89,12 @@ async function evaluateUser(userId: string): Promise<void> {
 
   if (!presence) return;
 
-  const now          = Date.now();
+  const now = Date.now();
   const lastActivity = new Date(presence.lastActivity).getTime();
-  const lastHB       = new Date(presence.lastHeartbeat).getTime();
+  const lastHB = new Date(presence.lastHeartbeat).getTime();
 
   // Rule 1: ONLINE -> AWAY (idle but still connected)
-  if (
-    presence.status === "ONLINE" &&
-    now - lastActivity > ONLINE_THRESHOLD_MS &&
-    socketCount > 0
-  ) {
+  if (presence.status === "ONLINE" && now - lastActivity > ONLINE_THRESHOLD_MS && socketCount > 0) {
     await presenceRepo.setPresenceFields(userId, { status: "AWAY" });
     await presenceRepo.publish(
       BROADCAST_CHANNEL,
@@ -130,8 +133,8 @@ async function syncAllToDatabase(): Promise<void> {
       })
     );
 
-    console.log("[presence-worker] synced " + userIds.length + " user(s) to DB");
+    logger.info({ count: userIds.length }, "Presence worker synced user(s) to DB");
   } catch (err) {
-    console.error("[presence-worker] DB sync error:", err);
+    logger.error({ err }, "Presence worker DB sync error");
   }
 }

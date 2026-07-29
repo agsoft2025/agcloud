@@ -2,6 +2,8 @@ import { AccessToken, VideoGrant, RoomServiceClient, EgressClient } from "liveki
 import type { RoomCompositeOptions } from "livekit-server-sdk/dist/EgressClient";
 import config from "../../config/index.js";
 import { CircuitBreaker } from "../../shared/utils/circuit-breaker.js";
+import { setCircuitBreakerState } from "../../shared/observability/metrics.js";
+import logger from "../../shared/observability/logger.js";
 
 const roomService = new RoomServiceClient(
   config.livekitUrl,
@@ -23,9 +25,14 @@ const livekitBreaker = new CircuitBreaker({
   failureThreshold: 5,
   openDurationMs: 30_000,
   timeout: 8_000,
+  onStateChange: (state) => setCircuitBreakerState("livekit", state),
 });
 
-export async function startRoomRecording(roomName: string, fileOutput: { filepath: string }, options?: Partial<RoomCompositeOptions>) {
+export async function startRoomRecording(
+  roomName: string,
+  fileOutput: { filepath: string },
+  options?: Partial<RoomCompositeOptions>
+) {
   return livekitBreaker.execute(() =>
     egressClient.startRoomCompositeEgress(roomName, fileOutput as any, options || {})
   );
@@ -39,7 +46,7 @@ export async function endLiveKitRoom(roomName: string): Promise<void> {
   try {
     await livekitBreaker.execute(() => roomService.deleteRoom(roomName));
   } catch (error) {
-    console.warn(`LiveKit room "${roomName}" could not be deleted.`, error);
+    logger.warn({ err: error, roomName }, "LiveKit room could not be deleted");
   }
 }
 
@@ -65,7 +72,7 @@ export async function checkLiveKitHealth(): Promise<boolean> {
     await livekitBreaker.execute(() => roomService.listRooms());
     return true;
   } catch (error) {
-    console.error("LiveKit Health Check Failed:", error);
+    logger.error({ err: error }, "LiveKit health check failed");
     return false;
   }
 }

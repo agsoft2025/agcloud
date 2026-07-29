@@ -1,0 +1,16 @@
+apiVersion: v2
+name: agcloud-backend
+description: agcloud backend — Fastify API, Socket.IO realtime, LiveKit call orchestration
+type: application
+# Chart version — bump on any template/values-shape change.
+version: 0.1.0
+# App version — informational default; overridden per-release with
+# `--set image.tag=<git-sha-or-semver>` (see 11.5 Release Process in
+# documents/Backend-Specification.md: tag -> build -> deploy).
+appVersion: "0.1.0"
+keywords:
+  - fastify
+  - livekit
+  - socket.io
+maintainers:
+  - name: agSoft

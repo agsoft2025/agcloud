@@ -1,5 +1,6 @@
 import { Redis } from "ioredis";
 import config from "../../config/index.js";
+import logger from "../observability/logger.js";
 
 let redis: Redis | null = null;
 
@@ -28,16 +29,18 @@ export function connectRedis(): Redis {
         (err as NodeJS.ErrnoException).code === "ECONNREFUSED" ||
         err.message.includes("ECONNREFUSED")
       ) {
-        console.warn("[redis] cannot connect to Redis at", config.redisUrl,
-          "— presence and real-time features will not work until Redis is started.");
+        logger.warn(
+          { redisUrl: config.redisUrl },
+          "Cannot connect to Redis — presence and real-time features will not work until Redis is started"
+        );
       } else {
-        console.error("[redis] error:", err.message);
+        logger.error({ err }, "Redis client error");
       }
     });
 
-    redis.on("connect", () => console.log("[redis] connected to", config.redisUrl));
-    redis.on("ready",   () => console.log("[redis] ready"));
-    redis.on("close",   () => console.warn("[redis] connection closed, reconnecting..."));
+    redis.on("connect", () => logger.info({ redisUrl: config.redisUrl }, "Redis connected"));
+    redis.on("ready", () => logger.info("Redis ready"));
+    redis.on("close", () => logger.warn("Redis connection closed, reconnecting..."));
   }
   return redis;
 }

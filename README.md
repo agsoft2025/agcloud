@@ -969,8 +969,11 @@ PROMETHEUS_METRICS_ENABLED=true
 
 # Email
 SMTP_HOST=...
+SMTP_PORT=587
 SMTP_USER=...
 SMTP_PASSWORD=...                        # secret
+SMTP_SECURE=false
+SMTP_FROM=no-reply@agcloud.example.com
 ```
 
 ### 9.2 Configuration Validation
@@ -1226,9 +1229,9 @@ This backend is the core business logic layer for the LiveKit-based `agcloud` ar
 - `JWT_SECRET=`
 
 ## Local development
-1. Install dependencies: `pnpm install`
+1. Install dependencies: `npm install`
 2. Copy environment file: `cp .env.example .env`
-3. Start the service: `pnpm dev`
+3. Start the service: `npm run dev`
 
 ## Architecture summary
 The backend is intentionally lightweight. It does not handle media or WebRTC signaling directly.
@@ -1553,7 +1556,7 @@ agcloud/
 ### Prerequisites
 
 - Node.js 20+
-- pnpm 9+
+- npm 10+
 - Docker + Docker Compose
 - A modern browser (Chrome, Firefox, Edge, or Safari)
 
@@ -1583,9 +1586,9 @@ docker-compose up -d mongo redis livekit
 
 # Backend
 cd backend
-pnpm install
+npm install
 cp .env.example .env   # fill in MONGO_URI, REDIS_URL, LIVEKIT_* , JWT_SECRET
-pnpm dev               # http://localhost:3000
+npm run dev            # http://localhost:3000
 
 # Frontend (new terminal)
 cd frontend

@@ -11,8 +11,13 @@ vi.mock("../../../src/modules/notification/fcm.client.js", () => ({
   sendFcmNotification: vi.fn().mockResolvedValue(true),
 }));
 
+vi.mock("../../../src/modules/notification/notification.queue.js", () => ({
+  enqueuePushFallback: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { sendApnsNotification, sendVoipPush } from "../../../src/modules/notification/apns.client.js";
 import { sendFcmNotification } from "../../../src/modules/notification/fcm.client.js";
+import { enqueuePushFallback } from "../../../src/modules/notification/notification.queue.js";
 import {
   registerDevice,
   unregisterDevice,
@@ -207,6 +212,46 @@ describe("notification.service", () => {
 
       const remaining = await col().find({ userId: "user-1" }).toArray();
       expect(remaining).toHaveLength(0);
+    });
+  });
+
+  describe("circuit-breaker fallback queue", () => {
+    it("enqueues a push fallback job when FCM reports the breaker is open", async () => {
+      await col().insertOne(makeDeviceDoc({ userId: "user-1", platform: "android", token: "and-tok" }));
+      vi.mocked(sendFcmNotification).mockResolvedValueOnce({ ok: false, circuitOpen: true });
+
+      await notifyIncomingCall("user-1", {
+        callId: "call-1", callerId: "caller-1", callerName: "Alice", callType: "audio", roomId: "room-1",
+      });
+
+      expect(enqueuePushFallback).toHaveBeenCalledWith(
+        expect.objectContaining({ platform: "android", token: "and-tok", isVoip: false, title: "Incoming Call" })
+      );
+      // Circuit-open is not a dead token — the device stays registered.
+      const remaining = await col().find({ userId: "user-1" }).toArray();
+      expect(remaining).toHaveLength(1);
+    });
+
+    it("enqueues a push fallback job when APNs reports the breaker is open", async () => {
+      await col().insertOne(makeDeviceDoc({ userId: "user-1", platform: "ios", token: "ios-tok" }));
+      vi.mocked(sendApnsNotification).mockResolvedValueOnce({ ok: false, circuitOpen: true });
+
+      await notifyMissedCall("user-1", { callId: "call-1", callerName: "Alice" });
+
+      expect(enqueuePushFallback).toHaveBeenCalledWith(
+        expect.objectContaining({ platform: "ios", token: "ios-tok", isVoip: false, title: "Missed Call" })
+      );
+    });
+
+    it("does not enqueue a fallback job on an ordinary transient failure", async () => {
+      await col().insertOne(makeDeviceDoc({ userId: "user-1", platform: "android", token: "flaky-tok" }));
+      vi.mocked(sendFcmNotification).mockResolvedValueOnce({ ok: false });
+
+      await notifyIncomingCall("user-1", {
+        callId: "call-1", callerId: "caller-1", callerName: "Alice", callType: "audio", roomId: "room-1",
+      });
+
+      expect(enqueuePushFallback).not.toHaveBeenCalled();
     });
   });
 });

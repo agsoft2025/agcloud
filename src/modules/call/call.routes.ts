@@ -1,7 +1,13 @@
-import { FastifyInstance, FastifyPluginAsync } from "fastify";
+import { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastify";
 import { initCallSchema, addParticipantSchema } from "./call.schemas.js";
-import { createLiveKitToken, endLiveKitRoom, getLiveKitPublicUrl, startRoomRecording, stopRecording } from "../livekit/livekit.service.js";
-import { CallRepository } from "./call.repository.js";
+import {
+  createLiveKitToken,
+  endLiveKitRoom,
+  getLiveKitPublicUrl,
+  startRoomRecording,
+  stopRecording,
+} from "../livekit/livekit.service.js";
+import { CallRepository, DuplicateActiveCallError } from "./call.repository.js";
 import { CallStateMachine } from "./call.state-machine.js";
 import { authenticate } from "../../shared/middleware/auth.middleware.js";
 import { emitToUser } from "../realtime/realtime.service.js";
@@ -10,9 +16,28 @@ import { BlockRepository } from "../contact/block.repository.js";
 import { notifyIncomingCall } from "../notification/notification.service.js";
 import { scheduleCallTimeout, cancelCallTimeout } from "./call.queue.js";
 import { withIdempotency } from "../../shared/utils/idempotency.js";
-import { callsInitiated, callsAccepted, callsRejected, callsEnded } from "../../shared/observability/metrics.js";
+import {
+  callsInitiated,
+  callsAccepted,
+  callsRejected,
+  callsEnded,
+} from "../../shared/observability/metrics.js";
 import logger from "../../shared/observability/logger.js";
 import config from "../../config/index.js";
+
+// Spec §5.4: 10 req/min per user (not per IP — callers behind a shared IP
+// must not share this budget). `hook: "preHandler"` runs this after the
+// `authenticate` preHandler in the array below, so `request.user` is
+// already populated by the time the keyGenerator reads it (the default
+// `onRequest` hook fires too early, before auth).
+const initiateRateLimitConfig = {
+  rateLimit: {
+    max: 10,
+    timeWindow: "1 minute",
+    hook: "preHandler" as const,
+    keyGenerator: (request: FastifyRequest) => request.user?.userId ?? request.ip,
+  },
+};
 
 const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   const callRepo = new CallRepository();
@@ -20,7 +45,7 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   const blockRepo = new BlockRepository();
 
   // List endpoint for testing in postman
-  app.get("/", async (request, reply) => {
+  app.get("/", async () => {
     return {
       endpoints: [
         "POST /calls/initiate - Initiate a new call",
@@ -30,9 +55,9 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         "POST /calls/:id/leave - Leave an ongoing conference",
         "POST /calls/:id/end - Hang up / end a call",
         "POST /calls/:id/record/start - Start call recording",
-        "POST /calls/:id/record/stop - Stop call recording"
+        "POST /calls/:id/record/stop - Stop call recording",
       ],
-      message: "Call routes are active"
+      message: "Call routes are active",
     };
   });
 
@@ -84,129 +109,151 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   // Initiate a new call. Idempotency-protected: a client retry/double-tap
   // that resends the same `Idempotency-Key` header gets the original response
   // replayed instead of creating a second call record.
-  app.post("/initiate", { preHandler: authenticate }, withIdempotency(async (request, reply) => {
-    const body = initCallSchema.parse(request.body);
-    const callerId = request.user!.userId;
+  app.post(
+    "/initiate",
+    { preHandler: authenticate, config: initiateRateLimitConfig },
+    withIdempotency(async (request, reply) => {
+      const body = initCallSchema.parse(request.body);
+      const callerId = request.user!.userId;
 
-    // Extract all receiver IDs (calleeId or receiverIds array)
-    let receiverIds = body.receiverIds || [];
-    if (receiverIds.length === 0 && body.calleeId) {
-      receiverIds = [body.calleeId];
-    }
+      // Extract all receiver IDs (calleeId or receiverIds array)
+      let receiverIds = body.receiverIds || [];
+      if (receiverIds.length === 0 && body.calleeId) {
+        receiverIds = [body.calleeId];
+      }
 
-    if (receiverIds.length === 0) {
-      return reply.status(400).send({ message: "At least one receiver ID is required" });
-    }
+      if (receiverIds.length === 0) {
+        return reply.status(400).send({ message: "At least one receiver ID is required" });
+      }
 
-    if (receiverIds.includes(callerId)) {
-      return reply.status(400).send({ message: "You cannot call yourself" });
-    }
+      if (receiverIds.includes(callerId)) {
+        return reply.status(400).send({ message: "You cannot call yourself" });
+      }
 
-    // Check if the caller is already in an active call
-    const activeCall = await callRepo.getActiveCallForUser(callerId);
-    if (activeCall) {
-      return reply.status(400).send({
-        message: "You are already in an active call",
-        callId: activeCall._id.toString()
-      });
-    }
+      // Check if the caller is already in an active call
+      const activeCall = await callRepo.getActiveCallForUser(callerId);
+      if (activeCall) {
+        return reply.status(400).send({
+          message: "You are already in an active call",
+          callId: activeCall._id.toString(),
+        });
+      }
 
-    // Blocklist guard: exclude any receiver who has blocked the caller, or
-    // whom the caller has blocked, in either direction.
-    const blockedReceiverIds = await blockRepo.filterBlockedEitherWay(callerId, receiverIds);
+      // Blocklist guard: exclude any receiver who has blocked the caller, or
+      // whom the caller has blocked, in either direction.
+      const blockedReceiverIds = await blockRepo.filterBlockedEitherWay(callerId, receiverIds);
 
-    // Callee-busy check: getActiveCallForUser already matches callerId, calleeId,
-    // AND receiverIds, so it works for any role — just needs to be called per
-    // receiver. Busy receivers are excluded from the invite instead of being
-    // silently rung a second time while already on another call.
-    const busyChecks = await Promise.all(
-      receiverIds
-        .filter((receiverId) => !blockedReceiverIds.includes(receiverId))
-        .map(async (receiverId) => ({
-          userId: receiverId,
-          activeCall: await callRepo.getActiveCallForUser(receiverId),
-        }))
-    );
-    const busyReceiverIds = busyChecks
-      .filter((check) => check.activeCall !== null)
-      .map((check) => check.userId);
-    const availableReceiverIds = receiverIds.filter(
-      (receiverId) => !busyReceiverIds.includes(receiverId) && !blockedReceiverIds.includes(receiverId)
-    );
+      // Callee-busy check: getActiveCallForUser already matches callerId, calleeId,
+      // AND receiverIds, so it works for any role — just needs to be called per
+      // receiver. Busy receivers are excluded from the invite instead of being
+      // silently rung a second time while already on another call.
+      const busyChecks = await Promise.all(
+        receiverIds
+          .filter((receiverId) => !blockedReceiverIds.includes(receiverId))
+          .map(async (receiverId) => ({
+            userId: receiverId,
+            activeCall: await callRepo.getActiveCallForUser(receiverId),
+          }))
+      );
+      const busyReceiverIds = busyChecks
+        .filter((check) => check.activeCall !== null)
+        .map((check) => check.userId);
+      const availableReceiverIds = receiverIds.filter(
+        (receiverId) =>
+          !busyReceiverIds.includes(receiverId) && !blockedReceiverIds.includes(receiverId)
+      );
 
-    if (availableReceiverIds.length === 0) {
-      const message = blockedReceiverIds.length > 0 && busyReceiverIds.length === 0
-        ? (body.callMode === "conference"
-            ? "All invited participants are unavailable"
-            : "You cannot call this person")
-        : (body.callMode === "conference"
-            ? "All invited participants are currently on another call"
-            : "The person you are calling is currently on another call");
+      if (availableReceiverIds.length === 0) {
+        const message =
+          blockedReceiverIds.length > 0 && busyReceiverIds.length === 0
+            ? body.callMode === "conference"
+              ? "All invited participants are unavailable"
+              : "You cannot call this person"
+            : body.callMode === "conference"
+              ? "All invited participants are currently on another call"
+              : "The person you are calling is currently on another call";
 
-      return reply.status(409).send({
-        message,
-        busyReceiverIds,
-        ...(blockedReceiverIds.length > 0 ? { blockedReceiverIds } : {}),
-      });
-    }
+        return reply.status(409).send({
+          message,
+          busyReceiverIds,
+          ...(blockedReceiverIds.length > 0 ? { blockedReceiverIds } : {}),
+        });
+      }
 
-    // Create call record in MongoDB — only the available (non-busy) receivers
-    // are actually invited/rung.
-    const callRecord = await callRepo.createCall(
-      callerId,
-      availableReceiverIds,
-      body.callType,
-      body.callMode,
-      body.recording
-    );
-    const roomId = callRecord.roomId || callRecord._id.toString();
+      // Create call record in MongoDB — only the available (non-busy) receivers
+      // are actually invited/rung. The "already in an active call" check above
+      // is a plain read, so two requests from the same caller can race past it
+      // concurrently (spec §10.2 "simultaneous initiation"); the DB-level
+      // unique index (mongo.client.ts) is the real backstop, and a rejection
+      // here is reported the same way the early check reports it.
+      let callRecord;
+      try {
+        callRecord = await callRepo.createCall(
+          callerId,
+          availableReceiverIds,
+          body.callType,
+          body.callMode,
+          body.recording
+        );
+      } catch (err) {
+        if (err instanceof DuplicateActiveCallError) {
+          const concurrentActiveCall = await callRepo.getActiveCallForUser(callerId);
+          return reply.status(400).send({
+            message: "You are already in an active call",
+            callId: concurrentActiveCall?._id.toString(),
+          });
+        }
+        throw err;
+      }
+      const roomId = callRecord.roomId || callRecord._id.toString();
 
-    // Generate token for the caller
-    const token = await createLiveKitToken(callerId, roomId);
+      // Generate token for the caller
+      const token = await createLiveKitToken(callerId, roomId);
 
-    // Notify all available receivers in real time so they see an incoming call popup
-    const caller = await userRepo.getUserById(callerId);
-    const callId = callRecord._id.toString();
+      // Notify all available receivers in real time so they see an incoming call popup
+      const caller = await userRepo.getUserById(callerId);
+      const callId = callRecord._id.toString();
 
-    // Auto-transition to "missed" if nobody accepts within 60s
-    void scheduleCallTimeout(callId);
-    callsInitiated.inc();
+      // Auto-transition to "missed" if nobody accepts within 60s
+      void scheduleCallTimeout(callId);
+      callsInitiated.inc();
 
-    const incomingCallPayload = {
-      callId,
-      callerId,
-      callerName: caller?.displayName ?? "Unknown",
-      callerAvatar: caller?.avatarUrl ?? null,
-      callType: callRecord.callType,
-      callMode: callRecord.callMode,
-      roomId,
-      reinvite: false,
-    };
-
-    for (const receiverId of availableReceiverIds) {
-      emitToUser(receiverId, "call:incoming", incomingCallPayload);
-      notifyIncomingCall(receiverId, {
+      const incomingCallPayload = {
         callId,
         callerId,
         callerName: caller?.displayName ?? "Unknown",
-        callerAvatar: caller?.avatarUrl,
+        callerAvatar: caller?.avatarUrl ?? null,
         callType: callRecord.callType,
+        callMode: callRecord.callMode,
         roomId,
-      }).catch((err: unknown) => logger.warn({ err, receiverId }, "Push notification failed"));
-    }
+        reinvite: false,
+      };
 
-    return reply.status(201).send({
-      message: "Call initiated successfully",
-      call: callRecord,
-      token,
-      roomName: roomId,
-      url: getLiveKitPublicUrl(),
-      // Included so the caller's client can show "X is busy" for anyone who
-      // was silently dropped from this call instead of being rung.
-      ...(busyReceiverIds.length > 0 ? { busyReceiverIds } : {}),
-      ...(blockedReceiverIds.length > 0 ? { blockedReceiverIds } : {}),
-    });
-  }));
+      for (const receiverId of availableReceiverIds) {
+        emitToUser(receiverId, "call:incoming", incomingCallPayload);
+        notifyIncomingCall(receiverId, {
+          callId,
+          callerId,
+          callerName: caller?.displayName ?? "Unknown",
+          callerAvatar: caller?.avatarUrl,
+          callType: callRecord.callType,
+          roomId,
+        }).catch((err: unknown) => logger.warn({ err, receiverId }, "Push notification failed"));
+      }
+
+      return reply.status(201).send({
+        message: "Call initiated successfully",
+        call: callRecord,
+        token,
+        roomName: roomId,
+        url: getLiveKitPublicUrl(),
+        // Included so the caller's client can show "X is busy" for anyone who
+        // was silently dropped from this call instead of being rung.
+        ...(busyReceiverIds.length > 0 ? { busyReceiverIds } : {}),
+        ...(blockedReceiverIds.length > 0 ? { blockedReceiverIds } : {}),
+      });
+    })
+  );
 
   // Add a participant to an ongoing call (converts it into a conference)
   app.post("/:id/add-participant", { preHandler: authenticate }, async (request, reply) => {
@@ -226,7 +273,9 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     }
 
     if (callRecord.status !== "initiated" && callRecord.status !== "active") {
-      return reply.status(400).send({ message: `Cannot add participants to a call with status '${callRecord.status}'` });
+      return reply
+        .status(400)
+        .send({ message: `Cannot add participants to a call with status '${callRecord.status}'` });
     }
 
     if (targetUserId === callRecord.callerId) {
@@ -292,7 +341,8 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       return reply.status(404).send({ message: "Call not found" });
     }
 
-    const isAuthorized = callRecord.callerId === userId ||
+    const isAuthorized =
+      callRecord.callerId === userId ||
       (callRecord.callMode === "conference"
         ? callRecord.receiverIds.includes(userId)
         : callRecord.calleeId === userId);
@@ -314,9 +364,10 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     }
 
     // Validate authorization: callee must be in the receivers list or equal to calleeId
-    const isAuthorized = callRecord.callMode === "conference"
-      ? callRecord.receiverIds.includes(calleeId)
-      : callRecord.calleeId === calleeId;
+    const isAuthorized =
+      callRecord.callMode === "conference"
+        ? callRecord.receiverIds.includes(calleeId)
+        : callRecord.calleeId === calleeId;
 
     if (!isAuthorized) {
       return reply.status(403).send({ message: "You are not authorized to accept this call" });
@@ -325,7 +376,7 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     if (callRecord.status !== "active") {
       if (!CallStateMachine.isValidTransition(callRecord.status, "active")) {
         return reply.status(400).send({
-          message: `Cannot transition call from '${callRecord.status}' to 'active'`
+          message: `Cannot transition call from '${callRecord.status}' to 'active'`,
         });
       }
 
@@ -381,7 +432,7 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       call: callRecord,
       token,
       roomName: roomId,
-      url: getLiveKitPublicUrl()
+      url: getLiveKitPublicUrl(),
     });
   });
 
@@ -395,9 +446,10 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       return reply.status(404).send({ message: "Call not found" });
     }
 
-    const isAuthorized = callRecord.callMode === "conference"
-      ? callRecord.receiverIds.includes(calleeId)
-      : callRecord.calleeId === calleeId;
+    const isAuthorized =
+      callRecord.callMode === "conference"
+        ? callRecord.receiverIds.includes(calleeId)
+        : callRecord.calleeId === calleeId;
 
     if (!isAuthorized) {
       return reply.status(403).send({ message: "You are not authorized to reject this call" });
@@ -423,7 +475,7 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
     if (!CallStateMachine.isValidTransition(callRecord.status, "rejected")) {
       return reply.status(400).send({
-        message: `Cannot transition call from '${callRecord.status}' to 'rejected'`
+        message: `Cannot transition call from '${callRecord.status}' to 'rejected'`,
       });
     }
 
@@ -462,7 +514,7 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
     if (!CallStateMachine.isValidTransition(callRecord.status, "cancelled")) {
       return reply.status(400).send({
-        message: `Cannot cancel a call with status '${callRecord.status}'`
+        message: `Cannot cancel a call with status '${callRecord.status}'`,
       });
     }
 
@@ -566,9 +618,10 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       return reply.status(404).send({ message: "Call not found" });
     }
 
-    const isAuthorized = callRecord.callerId === userId || 
-      (callRecord.callMode === "conference" 
-        ? callRecord.receiverIds.includes(userId) 
+    const isAuthorized =
+      callRecord.callerId === userId ||
+      (callRecord.callMode === "conference"
+        ? callRecord.receiverIds.includes(userId)
         : callRecord.calleeId === userId);
 
     if (!isAuthorized) {
@@ -582,7 +635,7 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
     if (!CallStateMachine.isValidTransition(callRecord.status, "ended")) {
       return reply.status(400).send({
-        message: `Cannot transition call from '${callRecord.status}' to 'ended'`
+        message: `Cannot transition call from '${callRecord.status}' to 'ended'`,
       });
     }
 
@@ -627,10 +680,13 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     await callRepo.updateCallStatus(id, callRecord.status, {
       recording: true,
       recordingStartedAt: new Date(),
-      egressId: egress.egressId
+      egressId: egress.egressId,
     });
 
-    return reply.send({ message: "Call recording started successfully", egressId: egress.egressId });
+    return reply.send({
+      message: "Call recording started successfully",
+      egressId: egress.egressId,
+    });
   });
 
   // Stop call recording (LiveKit Egress)
@@ -645,7 +701,9 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
     const isAuthorized = callRecord.callerId === userId || callRecord.receiverIds.includes(userId);
     if (!isAuthorized) {
-      return reply.status(403).send({ message: "You are not authorized to stop recording this call" });
+      return reply
+        .status(403)
+        .send({ message: "You are not authorized to stop recording this call" });
     }
 
     if (!callRecord.egressId) {
@@ -655,14 +713,21 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     await stopRecording(callRecord.egressId);
     await callRepo.updateCallStatus(id, callRecord.status, {
       recording: false,
-      recordingEndedAt: new Date()
+      recordingEndedAt: new Date(),
     });
 
     return reply.send({ message: "Call recording stopped successfully" });
   });
 
-  // HTML WebRTC Tester Page
+  // HTML WebRTC Tester Page — unauthenticated by design (it's a manual
+  // connectivity smoke-test tool, not an app feature), so it must never be
+  // reachable in production: it pulls a third-party CDN script and exposes
+  // the configured LiveKit host URL to anyone who finds the path.
   app.get("/test", async (request, reply) => {
+    if (config.env === "production") {
+      return reply.status(404).send({ message: "Not found" });
+    }
+
     reply.type("text/html");
     return `
 <!DOCTYPE html>

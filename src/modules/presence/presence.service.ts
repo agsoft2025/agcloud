@@ -13,30 +13,24 @@
 
 import type { Server as SocketIOServer } from "socket.io";
 import { getRedisClient } from "../../shared/db/redis.client.js";
+import logger from "../../shared/observability/logger.js";
 import { UserRepository } from "../user/user.repository.js";
 import { ContactRepository } from "../contact/contact.repository.js";
-import {
-  PresenceRepository,
-  BROADCAST_CHANNEL,
-} from "./presence.repository.js";
-import type {
-  PresenceBroadcast,
-  PresenceStatus,
-  RedisPresenceData,
-} from "./presence.types.js";
+import { PresenceRepository, BROADCAST_CHANNEL } from "./presence.repository.js";
+import type { PresenceBroadcast, PresenceStatus, RedisPresenceData } from "./presence.types.js";
 
 const presenceRepo = new PresenceRepository();
-const userRepo     = new UserRepository();
-const contactRepo  = new ContactRepository();
-let   io: SocketIOServer | null = null;
+const userRepo = new UserRepository();
+const contactRepo = new ContactRepository();
+let io: SocketIOServer | null = null;
 
 // ---- Thresholds ----
 
-export const ONLINE_THRESHOLD_MS  = 2 * 60_000;   // 2 min
-export const HEARTBEAT_AWAY_MS    = 60_000;        // 1 min (kept for worker compat)
-export const HEARTBEAT_TIMEOUT_MS = 10 * 60_000;  // 10 min
+export const ONLINE_THRESHOLD_MS = 2 * 60_000; // 2 min
+export const HEARTBEAT_AWAY_MS = 60_000; // 1 min (kept for worker compat)
+export const HEARTBEAT_TIMEOUT_MS = 10 * 60_000; // 10 min
 
-const ACTIVITY_THROTTLE_MS = 30_000;  // 30 s
+const ACTIVITY_THROTTLE_MS = 30_000; // 30 s
 const GRACE_PERIOD_SECONDS = 30;
 
 // ---- Bootstrap ----
@@ -52,12 +46,12 @@ function _setupSubscriber(): void {
   // Must attach error listener BEFORE subscribe, otherwise a connection
   // failure becomes an unhandled rejection that crashes the process.
   sub.on("error", (err: Error) => {
-    console.warn("[presence] subscriber connection error:", err.message);
+    logger.warn({ err }, "Presence subscriber connection error");
   });
 
   sub.subscribe(BROADCAST_CHANNEL, (err) => {
-    if (err) console.error("[presence] subscribe failed:", err.message);
-    else     console.log("[presence] subscribed to", BROADCAST_CHANNEL);
+    if (err) logger.error({ err }, "Presence subscribe failed");
+    else logger.info({ channel: BROADCAST_CHANNEL }, "Presence subscriber subscribed");
   });
 
   sub.on("message", (_channel: string, raw: string) => {
@@ -65,7 +59,7 @@ function _setupSubscriber(): void {
       const event = JSON.parse(raw) as PresenceBroadcast;
       void _deliverToWatchers(event);
     } catch (err) {
-      console.error("[presence] malformed broadcast message:", err);
+      logger.error({ err }, "Malformed presence broadcast message");
     }
   });
 }
@@ -92,7 +86,10 @@ async function _deliverToWatchers(event: PresenceBroadcast): Promise<void> {
       io.to("user:" + watcherId).emit(event.event, event);
     }
   } catch (err) {
-    console.error("[presence] failed to resolve contact watchers for", event.userId, err);
+    logger.error(
+      { err, userId: event.userId },
+      "Failed to resolve contact watchers for presence broadcast"
+    );
   }
 }
 
@@ -109,27 +106,21 @@ async function _deliverToWatchers(event: PresenceBroadcast): Promise<void> {
  * Math.max(lastActivity, lastHeartbeat) is used so a stale heartbeat from a
  * previous session does not cause premature OFFLINE after a fresh login.
  */
-export function computeStatus(
-  presence: RedisPresenceData,
-  socketCount: number
-): PresenceStatus {
-  const now        = Date.now();
-  const lastAct    = new Date(presence.lastActivity).getTime();
-  const lastHB     = new Date(presence.lastHeartbeat).getTime();
+export function computeStatus(presence: RedisPresenceData, socketCount: number): PresenceStatus {
+  const now = Date.now();
+  const lastAct = new Date(presence.lastActivity).getTime();
+  const lastHB = new Date(presence.lastHeartbeat).getTime();
   const lastSignal = Math.max(lastAct, lastHB);
 
-  if (now - lastAct <= ONLINE_THRESHOLD_MS)      return "ONLINE";
-  if (socketCount > 0)                           return "AWAY";
-  if (now - lastSignal > HEARTBEAT_TIMEOUT_MS)   return "OFFLINE";
+  if (now - lastAct <= ONLINE_THRESHOLD_MS) return "ONLINE";
+  if (socketCount > 0) return "AWAY";
+  if (now - lastSignal > HEARTBEAT_TIMEOUT_MS) return "OFFLINE";
   return "AWAY";
 }
 
 // ---- WebSocket lifecycle ----
 
-export async function handleConnection(
-  userId: string,
-  socketId: string
-): Promise<void> {
+export async function handleConnection(userId: string, socketId: string): Promise<void> {
   const now = new Date().toISOString();
 
   await Promise.all([
@@ -137,38 +128,42 @@ export async function handleConnection(
     presenceRepo.clearGracePeriod(userId),
   ]);
 
-  const existing       = await presenceRepo.getPresence(userId);
+  const existing = await presenceRepo.getPresence(userId);
   const previousStatus = existing?.status ?? "OFFLINE";
 
   await presenceRepo.setPresenceFields(userId, {
-    status:        "ONLINE",
-    lastActivity:  now,
+    status: "ONLINE",
+    lastActivity: now,
     lastHeartbeat: now,
-    lastSeen:      existing?.lastSeen ?? now,
+    lastSeen: existing?.lastSeen ?? now,
   });
 
   const socketCount = await presenceRepo.getSocketCount(userId);
 
   if (previousStatus !== "ONLINE") {
-    await _broadcast({ event: "USER_ONLINE", userId, status: "ONLINE", activeDevices: socketCount });
+    await _broadcast({
+      event: "USER_ONLINE",
+      userId,
+      status: "ONLINE",
+      activeDevices: socketCount,
+    });
   } else {
-    await _broadcast({ event: "PRESENCE_UPDATED", userId, status: "ONLINE", activeDevices: socketCount });
+    await _broadcast({
+      event: "PRESENCE_UPDATED",
+      userId,
+      status: "ONLINE",
+      activeDevices: socketCount,
+    });
   }
 }
 
-export async function handleDisconnect(
-  userId: string,
-  socketId: string
-): Promise<void> {
+export async function handleDisconnect(userId: string, socketId: string): Promise<void> {
   await presenceRepo.removeSocket(userId, socketId);
   const socketCount = await presenceRepo.getSocketCount(userId);
 
   if (socketCount === 0) {
     await presenceRepo.setGracePeriod(userId, GRACE_PERIOD_SECONDS);
-    setTimeout(
-      () => void _checkAndMarkOffline(userId),
-      (GRACE_PERIOD_SECONDS + 5) * 1000
-    );
+    setTimeout(() => void _checkAndMarkOffline(userId), (GRACE_PERIOD_SECONDS + 5) * 1000);
   }
 }
 
@@ -183,8 +178,8 @@ export async function _checkAndMarkOffline(userId: string): Promise<void> {
   const presence = await presenceRepo.getPresence(userId);
   if (!presence || presence.status === "OFFLINE") return;
 
-  const lastAct           = new Date(presence.lastActivity).getTime();
-  const lastHB            = new Date(presence.lastHeartbeat).getTime();
+  const lastAct = new Date(presence.lastActivity).getTime();
+  const lastHB = new Date(presence.lastHeartbeat).getTime();
   const msSinceLastSignal = Date.now() - Math.max(lastAct, lastHB);
 
   if (msSinceLastSignal > HEARTBEAT_TIMEOUT_MS) {
@@ -213,19 +208,19 @@ export async function handleHeartbeat(userId: string): Promise<void> {
  */
 export async function handleActivity(userId: string): Promise<void> {
   const presence = await presenceRepo.getPresence(userId);
-  const now      = Date.now();
+  const now = Date.now();
 
   if (presence) {
     const msSinceLast = now - new Date(presence.lastActivity).getTime();
     if (msSinceLast < ACTIVITY_THROTTLE_MS) return;
   }
 
-  const nowStr         = new Date(now).toISOString();
+  const nowStr = new Date(now).toISOString();
   const previousStatus = presence?.status ?? "OFFLINE";
 
   await presenceRepo.setPresenceFields(userId, {
-    status:        "ONLINE",
-    lastActivity:  nowStr,
+    status: "ONLINE",
+    lastActivity: nowStr,
     lastHeartbeat: nowStr,
     ...(presence ? {} : { lastSeen: nowStr }),
   });
@@ -233,9 +228,9 @@ export async function handleActivity(userId: string): Promise<void> {
   if (previousStatus !== "ONLINE") {
     const socketCount = await presenceRepo.getSocketCount(userId);
     await _broadcast({
-      event:         "USER_ONLINE",
+      event: "USER_ONLINE",
       userId,
-      status:        "ONLINE",
+      status: "ONLINE",
       activeDevices: socketCount,
     });
   }
@@ -244,11 +239,11 @@ export async function handleActivity(userId: string): Promise<void> {
 // ---- REST API helper ----
 
 export async function getPresenceForUser(userId: string): Promise<{
-  userId:        string;
-  status:        PresenceStatus;
-  lastSeen:      string | null;
+  userId: string;
+  status: PresenceStatus;
+  lastSeen: string | null;
   activeDevices: number;
-  isConnected:   boolean;
+  isConnected: boolean;
 } | null> {
   const [presence, socketCount] = await Promise.all([
     presenceRepo.getPresence(userId),
@@ -262,9 +257,9 @@ export async function getPresenceForUser(userId: string): Promise<{
   return {
     userId,
     status,
-    lastSeen:      presence.lastSeen ?? null,
+    lastSeen: presence.lastSeen ?? null,
     activeDevices: socketCount,
-    isConnected:   socketCount > 0,
+    isConnected: socketCount > 0,
   };
 }
 

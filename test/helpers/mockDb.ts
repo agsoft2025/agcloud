@@ -15,6 +15,7 @@ vi.mock("../../src/shared/db/mongo.client.js", async () => {
     connectMongo: async () => db,
     getMongoClient: () => ({ db: () => db }),
     ensureIndexes: async () => {},
+    closeMongo: async () => {},
   };
 });
 

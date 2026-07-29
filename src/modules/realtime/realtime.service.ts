@@ -116,8 +116,8 @@ export function initRealtime(httpServer: HttpServer): SocketIOServer {
   // so cookie parsing is the primary path.
   io.use((socket, next) => {
     try {
-      const cookieHeader  = socket.handshake.headers.cookie ?? "";
-      const cookies       = parseCookies(cookieHeader);
+      const cookieHeader = socket.handshake.headers.cookie ?? "";
+      const cookies = parseCookies(cookieHeader);
 
       const token =
         (socket.handshake.auth?.token as string | undefined) ??
@@ -125,7 +125,7 @@ export function initRealtime(httpServer: HttpServer): SocketIOServer {
         cookies["token"];
 
       if (!token) {
-        console.warn("[realtime] socket rejected: no token in auth/header/cookie");
+        logger.warn("Socket rejected: no token in auth/header/cookie");
         return next(new Error("Authentication required"));
       }
 
@@ -133,7 +133,7 @@ export function initRealtime(httpServer: HttpServer): SocketIOServer {
       socket.data.userId = decoded.userId;
       next();
     } catch (err) {
-      console.warn("[realtime] socket auth failed:", (err as Error).message);
+      logger.warn({ err }, "Socket auth failed");
       next(new Error("Invalid or expired token"));
     }
   });
@@ -194,7 +194,7 @@ async function reinvitePendingCalls(userId: string): Promise<void> {
       });
     }
   } catch (err) {
-    console.error("[realtime] failed to re-notify pending calls for", userId, err);
+    logger.error({ err, userId }, "Failed to re-notify pending calls");
   }
 }
 

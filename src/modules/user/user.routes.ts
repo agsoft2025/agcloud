@@ -3,11 +3,12 @@ import { UserRepository } from "./user.repository.js";
 import { UserDocument } from "./user.schemas.js";
 import { authenticate } from "../../shared/middleware/auth.middleware.js";
 import { activityMiddleware } from "../../shared/middleware/activity.middleware.js";
-import { getPresenceForUser, presenceRepo, computeStatus } from "../presence/presence.service.js";
+import { presenceRepo, computeStatus } from "../presence/presence.service.js";
 import { ContactRepository } from "../contact/contact.repository.js";
 import { BlockRepository } from "../contact/block.repository.js";
 import { ObjectId } from "mongodb";
 import { connectMongo } from "../../shared/db/mongo.client.js";
+import logger from "../../shared/observability/logger.js";
 import { z } from "zod";
 
 /**
@@ -19,19 +20,19 @@ import { z } from "zod";
  */
 function toContact(user: UserDocument, liveStatus: string | null) {
   return {
-    id:              user._id.toString(),
-    email:           user.email,
-    displayName:     user.displayName,
-    avatarUrl:       user.avatarUrl ?? null,
-    role:            user.role,
-    status:          user.status,
-    phoneNumber:     user.phoneNumber,
+    id: user._id.toString(),
+    email: user.email,
+    displayName: user.displayName,
+    avatarUrl: user.avatarUrl ?? null,
+    role: user.role,
+    status: user.status,
+    phoneNumber: user.phoneNumber,
     extensionNumber: user.extensionNumber,
-    designation:     user.designation,
-    department:      user.department,
+    designation: user.designation,
+    department: user.department,
     // null means Redis has no record => user is offline
-    presenceStatus:  (liveStatus ?? "offline").toLowerCase(),
-    lastSeenAt:      user.lastSeenAt,
+    presenceStatus: (liveStatus ?? "offline").toLowerCase(),
+    lastSeenAt: user.lastSeenAt,
   };
 }
 
@@ -56,7 +57,7 @@ const userRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   // GET /users — contact list enriched with live Redis presence
   app.get("/", { preHandler: [authenticate, activityMiddleware] }, async (request, reply) => {
     const query = request.query as { page?: string; limit?: string; search?: string };
-    const page  = Math.max(1, parseInt(query.page ?? "1", 10) || 1);
+    const page = Math.max(1, parseInt(query.page ?? "1", 10) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(query.limit ?? "20", 10) || 20));
 
     const { users, total } = await userRepo.listContacts({
@@ -74,9 +75,9 @@ const userRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
     return reply.send({
       users: users.map((u) => {
-        const id       = u._id.toString();
+        const id = u._id.toString();
         const presence = presenceMap.get(id);
-        const sockets  = socketCountMap.get(id) ?? 0;
+        const sockets = socketCountMap.get(id) ?? 0;
         // No Redis record => user has never connected since last restart => OFFLINE
         const live = presence ? computeStatus(presence, sockets) : null;
         return toContact(u, live);
@@ -88,63 +89,71 @@ const userRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   });
 
   // GET /users/presence — bulk live presence (Redis-backed, not MongoDB)
-  app.get("/presence", { preHandler: [authenticate, activityMiddleware] }, async (_request, reply) => {
-    // Fetch all users from DB to get the full user list, then enrich from Redis.
-    // We do NOT read presenceStatus from MongoDB here because it can be hours stale.
-    const allDbPresence = await userRepo.getAllPresence();
-    const userIds = allDbPresence.map((p) => p.userId);
+  app.get(
+    "/presence",
+    { preHandler: [authenticate, activityMiddleware] },
+    async (_request, reply) => {
+      // Fetch all users from DB to get the full user list, then enrich from Redis.
+      // We do NOT read presenceStatus from MongoDB here because it can be hours stale.
+      const allDbPresence = await userRepo.getAllPresence();
+      const userIds = allDbPresence.map((p) => p.userId);
 
-    const [presenceMap, socketCountMap] = await Promise.all([
-      presenceRepo.batchGetPresence(userIds),
-      presenceRepo.batchGetSocketCounts(userIds),
-    ]);
+      const [presenceMap, socketCountMap] = await Promise.all([
+        presenceRepo.batchGetPresence(userIds),
+        presenceRepo.batchGetSocketCounts(userIds),
+      ]);
 
-    return reply.send(
-      allDbPresence.map((p) => {
-        const redisPresence = presenceMap.get(p.userId);
-        const sockets = socketCountMap.get(p.userId) ?? 0;
-        // If Redis has no record the user is OFFLINE (no active session since last restart)
-        const status = redisPresence
-          ? computeStatus(redisPresence, sockets).toLowerCase()
-          : "offline";
-        const lastSeen = redisPresence?.lastSeen ?? p.lastSeen?.toISOString() ?? null;
-        return { userId: p.userId, status, lastSeen };
-      })
-    );
-  });
+      return reply.send(
+        allDbPresence.map((p) => {
+          const redisPresence = presenceMap.get(p.userId);
+          const sockets = socketCountMap.get(p.userId) ?? 0;
+          // If Redis has no record the user is OFFLINE (no active session since last restart)
+          const status = redisPresence
+            ? computeStatus(redisPresence, sockets).toLowerCase()
+            : "offline";
+          const lastSeen = redisPresence?.lastSeen ?? p.lastSeen?.toISOString() ?? null;
+          return { userId: p.userId, status, lastSeen };
+        })
+      );
+    }
+  );
 
   // GET /users/:id/presence — real-time presence for a single user
-  app.get("/:id/presence", { preHandler: [authenticate, activityMiddleware] }, async (request, reply) => {
-    const { id } = request.params as { id: string };
+  app.get(
+    "/:id/presence",
+    { preHandler: [authenticate, activityMiddleware] },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
 
-    // If no Redis record exists, user is OFFLINE
-    const [redisPresence, sockets] = await Promise.all([
-      presenceRepo.getPresence(id),
-      presenceRepo.getSocketCount(id),
-    ]);
+      // If no Redis record exists, user is OFFLINE
+      const [redisPresence, sockets] = await Promise.all([
+        presenceRepo.getPresence(id),
+        presenceRepo.getSocketCount(id),
+      ]);
 
-    if (!redisPresence) {
-      // Fall back to DB for lastSeen even when user has no Redis record
-      const dbUser = await userRepo.getUserById(id);
-      if (!dbUser) return reply.status(404).send({ message: "User not found" });
+      if (!redisPresence) {
+        // Fall back to DB for lastSeen even when user has no Redis record
+        const dbUser = await userRepo.getUserById(id);
+        if (!dbUser) return reply.status(404).send({ message: "User not found" });
+        return reply.send({
+          userId: id,
+          status: "OFFLINE",
+          lastSeen: dbUser.lastSeenAt?.toISOString() ?? null,
+          activeDevices: 0,
+          isConnected: false,
+        });
+      }
+
+      const status = computeStatus(redisPresence, sockets);
       return reply.send({
-        userId:        id,
-        status:        "OFFLINE",
-        lastSeen:      dbUser.lastSeenAt?.toISOString() ?? null,
-        activeDevices: 0,
-        isConnected:   false,
+        userId: id,
+        status,
+        lastSeen: redisPresence.lastSeen ?? null,
+        activeDevices: sockets,
+        isConnected: sockets > 0,
       });
     }
-
-    const status = computeStatus(redisPresence, sockets);
-    return reply.send({
-      userId:        id,
-      status,
-      lastSeen:      redisPresence.lastSeen ?? null,
-      activeDevices: sockets,
-      isConnected:   sockets > 0,
-    });
-  });
+  );
 
   // PUT /users/me — update own profile
   app.put("/me", { preHandler: [authenticate, activityMiddleware] }, async (request, reply) => {
@@ -153,7 +162,7 @@ const userRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
 
       const updates: Record<string, unknown> = { updatedAt: new Date() };
       if (body.displayName !== undefined) updates.displayName = body.displayName;
-      if (body.avatarUrl !== undefined)   updates.avatarUrl   = body.avatarUrl;
+      if (body.avatarUrl !== undefined) updates.avatarUrl = body.avatarUrl;
 
       const result = await usersCollection.findOneAndUpdate(
         { _id: new ObjectId(request.user!.userId) },
@@ -167,126 +176,150 @@ const userRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       if (!result) return reply.status(404).send({ message: "User not found" });
 
       return reply.send({
-        id:          result._id,
-        email:       result.email,
-        role:        result.role,
-        status:      result.status,
+        id: result._id,
+        email: result.email,
+        role: result.role,
+        status: result.status,
         displayName: result.displayName,
-        avatarUrl:   result.avatarUrl ?? null,
+        avatarUrl: result.avatarUrl ?? null,
       });
     } catch (error: unknown) {
       if (error instanceof z.ZodError) {
         return reply.status(400).send({ message: "Validation failed", errors: error.issues });
       }
-      console.error(error);
+      logger.error({ err: error }, "PUT /users/me failed");
       return reply.status(500).send({ message: "Internal server error" });
     }
   });
 
   // GET /users/me/contacts — the caller's own contact list, enriched with live presence
-  app.get("/me/contacts", { preHandler: [authenticate, activityMiddleware] }, async (request, reply) => {
-    const ownerId = request.user!.userId;
-    const contactIds = await contactRepo.listContactIds(ownerId);
+  app.get(
+    "/me/contacts",
+    { preHandler: [authenticate, activityMiddleware] },
+    async (request, reply) => {
+      const ownerId = request.user!.userId;
+      const contactIds = await contactRepo.listContactIds(ownerId);
 
-    const users = (
-      await Promise.all(contactIds.map((id) => userRepo.getUserById(id)))
-    ).filter((u): u is UserDocument => u !== null);
+      const users = (await Promise.all(contactIds.map((id) => userRepo.getUserById(id)))).filter(
+        (u): u is UserDocument => u !== null
+      );
 
-    const userIds = users.map((u) => u._id.toString());
-    const [presenceMap, socketCountMap] = await Promise.all([
-      presenceRepo.batchGetPresence(userIds),
-      presenceRepo.batchGetSocketCounts(userIds),
-    ]);
+      const userIds = users.map((u) => u._id.toString());
+      const [presenceMap, socketCountMap] = await Promise.all([
+        presenceRepo.batchGetPresence(userIds),
+        presenceRepo.batchGetSocketCounts(userIds),
+      ]);
 
-    return reply.send({
-      contacts: users.map((u) => {
-        const id = u._id.toString();
-        const presence = presenceMap.get(id);
-        const sockets = socketCountMap.get(id) ?? 0;
-        const live = presence ? computeStatus(presence, sockets) : null;
-        return toContact(u, live);
-      }),
-    });
-  });
+      return reply.send({
+        contacts: users.map((u) => {
+          const id = u._id.toString();
+          const presence = presenceMap.get(id);
+          const sockets = socketCountMap.get(id) ?? 0;
+          const live = presence ? computeStatus(presence, sockets) : null;
+          return toContact(u, live);
+        }),
+      });
+    }
+  );
 
   // POST /users/me/contacts — add a contact by user ID
-  app.post("/me/contacts", { preHandler: [authenticate, activityMiddleware] }, async (request, reply) => {
-    const ownerId = request.user!.userId;
-    const body = z.object({ userId: z.string().min(1) }).parse(request.body);
+  app.post(
+    "/me/contacts",
+    { preHandler: [authenticate, activityMiddleware] },
+    async (request, reply) => {
+      const ownerId = request.user!.userId;
+      const body = z.object({ userId: z.string().min(1) }).parse(request.body);
 
-    if (body.userId === ownerId) {
-      return reply.status(400).send({ message: "You cannot add yourself as a contact" });
+      if (body.userId === ownerId) {
+        return reply.status(400).send({ message: "You cannot add yourself as a contact" });
+      }
+
+      const targetUser = await userRepo.getUserById(body.userId);
+      if (!targetUser) {
+        return reply.status(404).send({ message: "User not found" });
+      }
+
+      await contactRepo.addContact(ownerId, body.userId);
+      return reply.status(201).send({ message: "Contact added successfully" });
     }
-
-    const targetUser = await userRepo.getUserById(body.userId);
-    if (!targetUser) {
-      return reply.status(404).send({ message: "User not found" });
-    }
-
-    await contactRepo.addContact(ownerId, body.userId);
-    return reply.status(201).send({ message: "Contact added successfully" });
-  });
+  );
 
   // DELETE /users/me/contacts/:id — remove a contact
-  app.delete("/me/contacts/:id", { preHandler: [authenticate, activityMiddleware] }, async (request, reply) => {
-    const ownerId = request.user!.userId;
-    const { id } = userIdParamSchema.parse(request.params);
+  app.delete(
+    "/me/contacts/:id",
+    { preHandler: [authenticate, activityMiddleware] },
+    async (request, reply) => {
+      const ownerId = request.user!.userId;
+      const { id } = userIdParamSchema.parse(request.params);
 
-    const removed = await contactRepo.removeContact(ownerId, id);
-    if (!removed) {
-      return reply.status(404).send({ message: "Contact not found" });
+      const removed = await contactRepo.removeContact(ownerId, id);
+      if (!removed) {
+        return reply.status(404).send({ message: "Contact not found" });
+      }
+      return reply.send({ message: "Contact removed successfully" });
     }
-    return reply.send({ message: "Contact removed successfully" });
-  });
+  );
 
   // GET /users/me/blocked — list of users the caller has blocked
-  app.get("/me/blocked", { preHandler: [authenticate, activityMiddleware] }, async (request, reply) => {
-    const blockerId = request.user!.userId;
-    const blockedIds = await blockRepo.listBlockedIds(blockerId);
+  app.get(
+    "/me/blocked",
+    { preHandler: [authenticate, activityMiddleware] },
+    async (request, reply) => {
+      const blockerId = request.user!.userId;
+      const blockedIds = await blockRepo.listBlockedIds(blockerId);
 
-    const users = (
-      await Promise.all(blockedIds.map((id) => userRepo.getUserById(id)))
-    ).filter((u): u is UserDocument => u !== null);
+      const users = (await Promise.all(blockedIds.map((id) => userRepo.getUserById(id)))).filter(
+        (u): u is UserDocument => u !== null
+      );
 
-    return reply.send({
-      blocked: users.map((u) => ({
-        id: u._id.toString(),
-        email: u.email,
-        displayName: u.displayName,
-        avatarUrl: u.avatarUrl ?? null,
-      })),
-    });
-  });
+      return reply.send({
+        blocked: users.map((u) => ({
+          id: u._id.toString(),
+          email: u.email,
+          displayName: u.displayName,
+          avatarUrl: u.avatarUrl ?? null,
+        })),
+      });
+    }
+  );
 
   // POST /users/me/block/:id — block a user (also guards call initiation)
-  app.post("/me/block/:id", { preHandler: [authenticate, activityMiddleware] }, async (request, reply) => {
-    const blockerId = request.user!.userId;
-    const { id } = userIdParamSchema.parse(request.params);
+  app.post(
+    "/me/block/:id",
+    { preHandler: [authenticate, activityMiddleware] },
+    async (request, reply) => {
+      const blockerId = request.user!.userId;
+      const { id } = userIdParamSchema.parse(request.params);
 
-    if (id === blockerId) {
-      return reply.status(400).send({ message: "You cannot block yourself" });
+      if (id === blockerId) {
+        return reply.status(400).send({ message: "You cannot block yourself" });
+      }
+
+      const targetUser = await userRepo.getUserById(id);
+      if (!targetUser) {
+        return reply.status(404).send({ message: "User not found" });
+      }
+
+      await blockRepo.block(blockerId, id);
+      return reply.status(201).send({ message: "User blocked successfully" });
     }
-
-    const targetUser = await userRepo.getUserById(id);
-    if (!targetUser) {
-      return reply.status(404).send({ message: "User not found" });
-    }
-
-    await blockRepo.block(blockerId, id);
-    return reply.status(201).send({ message: "User blocked successfully" });
-  });
+  );
 
   // DELETE /users/me/block/:id — unblock a user
-  app.delete("/me/block/:id", { preHandler: [authenticate, activityMiddleware] }, async (request, reply) => {
-    const blockerId = request.user!.userId;
-    const { id } = userIdParamSchema.parse(request.params);
+  app.delete(
+    "/me/block/:id",
+    { preHandler: [authenticate, activityMiddleware] },
+    async (request, reply) => {
+      const blockerId = request.user!.userId;
+      const { id } = userIdParamSchema.parse(request.params);
 
-    const removed = await blockRepo.unblock(blockerId, id);
-    if (!removed) {
-      return reply.status(404).send({ message: "Block not found" });
+      const removed = await blockRepo.unblock(blockerId, id);
+      if (!removed) {
+        return reply.status(404).send({ message: "Block not found" });
+      }
+      return reply.send({ message: "User unblocked successfully" });
     }
-    return reply.send({ message: "User unblocked successfully" });
-  });
+  );
 
   // GET /users/:id — single user profile with live presence
   app.get("/:id", { preHandler: [authenticate, activityMiddleware] }, async (request, reply) => {

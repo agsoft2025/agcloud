@@ -30,7 +30,14 @@ export class FakeRedis extends EventEmitter {
     return this.strings.get(key) ?? null;
   }
 
-  async set(key: string, value: string, ...rest: unknown[]): Promise<"OK"> {
+  async set(key: string, value: string, ...rest: unknown[]): Promise<"OK" | null> {
+    // NX ("set if not exists") — checked before writing, and against
+    // notExpired() so an expired key is treated as absent, matching real
+    // Redis TTL semantics.
+    if (rest.includes("NX") && this.notExpired(key) && this.strings.has(key)) {
+      return null;
+    }
+
     this.strings.set(key, value);
     const exIndex = rest.findIndex((r) => r === "EX");
     if (exIndex !== -1) {

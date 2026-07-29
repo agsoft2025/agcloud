@@ -2,6 +2,7 @@ import { ObjectId } from "mongodb";
 import { connectMongo } from "../../shared/db/mongo.client.js";
 import { sendFcmNotification } from "./fcm.client.js";
 import { sendApnsNotification, sendVoipPush } from "./apns.client.js";
+import { enqueuePushFallback } from "./notification.queue.js";
 import logger from "../../shared/observability/logger.js";
 
 export type Platform = "android" | "ios" | "web";
@@ -85,59 +86,79 @@ export async function notifyIncomingCall(userId: string, payload: IncomingCallPa
     roomId: payload.roomId,
   };
 
+  const title = "Incoming Call";
+  const body = `${payload.callerName} is calling`;
+
   const results = await Promise.allSettled(
     devices.map(async (device) => {
       if (device.platform === "ios") {
         if (device.voipToken) {
           const result = await sendVoipPush(device.voipToken, { ...data, "content-available": 1 });
-          return { device, token: device.voipToken, isVoip: true, result };
+          return { device, token: device.voipToken, isVoip: true, title, body, data, result };
         }
         const result = await sendApnsNotification({
           deviceToken: device.token,
           pushType: "alert",
           priority: 10,
           aps: {
-            alert: { title: "Incoming Call", body: `${payload.callerName} is calling` },
+            alert: { title, body },
             sound: "default",
             "content-available": 1,
           },
           data,
         });
-        return { device, token: device.token, isVoip: false, result };
+        return { device, token: device.token, isVoip: false, title, body, data, result };
       }
       const result = await sendFcmNotification({
         token: device.token,
-        title: "Incoming Call",
-        body: `${payload.callerName} is calling`,
+        title,
+        body,
         data,
         priority: "high",
         ttl: 60,
       });
-      return { device, token: device.token, isVoip: false, result };
+      return { device, token: device.token, isVoip: false, title, body, data, result };
     })
   );
 
-  await pruneDeadDevices(results);
+  await handleSendResults(results);
 }
 
-/** Stop retrying tokens FCM/APNs reported as permanently invalid (UNREGISTERED / 410 Gone). */
-async function pruneDeadDevices(
-  results: PromiseSettledResult<{
-    device: DeviceDocument;
-    token: string;
-    isVoip: boolean;
-    result: { ok: boolean; permanentFailure?: boolean };
-  }>[]
-): Promise<void> {
+interface DeviceSendOutcome {
+  device: DeviceDocument;
+  token: string;
+  isVoip: boolean;
+  title: string;
+  body: string;
+  data: Record<string, string>;
+  result: { ok: boolean; permanentFailure?: boolean; circuitOpen?: boolean };
+}
+
+/**
+ * Post-processes per-device send outcomes:
+ *  - permanently invalid tokens (UNREGISTERED / 410 Gone) are pruned so they stop being retried
+ *  - sends rejected by an OPEN circuit breaker are handed to the fallback
+ *    queue (spec §6.4) instead of being silently dropped
+ */
+async function handleSendResults(results: PromiseSettledResult<DeviceSendOutcome>[]): Promise<void> {
   for (const settled of results) {
     if (settled.status !== "fulfilled") continue;
-    const { device, token, isVoip, result } = settled.value;
-    if (!result.permanentFailure) continue;
+    const { device, token, isVoip, title, body, data, result } = settled.value;
 
-    const prune = isVoip ? clearVoipToken(device.userId, token) : unregisterDevice(device.userId, token);
-    await prune.catch((err: unknown) =>
-      logger.warn({ err, userId: device.userId, platform: device.platform, isVoip }, "Failed to prune dead device token")
-    );
+    if (result.permanentFailure) {
+      const prune = isVoip ? clearVoipToken(device.userId, token) : unregisterDevice(device.userId, token);
+      await prune.catch((err: unknown) =>
+        logger.warn(
+          { err, userId: device.userId, platform: device.platform, isVoip },
+          "Failed to prune dead device token"
+        )
+      );
+      continue;
+    }
+
+    if (result.circuitOpen) {
+      await enqueuePushFallback({ platform: device.platform, token, isVoip, title, body, data });
+    }
   }
 }
 
@@ -159,6 +180,9 @@ export async function notifyMissedCall(
     callerName: payload.callerName,
   };
 
+  const title = "Missed Call";
+  const body = `You missed a call from ${payload.callerName}`;
+
   const results = await Promise.allSettled(
     devices.map(async (device) => {
       if (device.platform === "ios") {
@@ -166,22 +190,22 @@ export async function notifyMissedCall(
           deviceToken: device.token,
           pushType: "alert",
           aps: {
-            alert: { title: "Missed Call", body: `You missed a call from ${payload.callerName}` },
+            alert: { title, body },
             sound: "default",
           },
           data,
         });
-        return { device, token: device.token, isVoip: false, result };
+        return { device, token: device.token, isVoip: false, title, body, data, result };
       }
       const result = await sendFcmNotification({
         token: device.token,
-        title: "Missed Call",
-        body: `You missed a call from ${payload.callerName}`,
+        title,
+        body,
         data,
       });
-      return { device, token: device.token, isVoip: false, result };
+      return { device, token: device.token, isVoip: false, title, body, data, result };
     })
   );
 
-  await pruneDeadDevices(results);
+  await handleSendResults(results);
 }

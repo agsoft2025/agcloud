@@ -2,7 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 
 class FakeIORedis extends EventEmitter {
-  constructor(public url: string, public options: unknown) {
+  constructor(
+    public url: string,
+    public options: unknown
+  ) {
     super();
   }
 }
@@ -53,7 +56,8 @@ describe("shared/db/redis.client", () => {
   it("retryStrategy backs off linearly and gives up after 20 attempts", async () => {
     const { connectRedis } = await import("../../../src/shared/db/redis.client.js");
     const client = connectRedis() as unknown as FakeIORedis;
-    const retryStrategy = (client.options as { retryStrategy: (times: number) => number | null }).retryStrategy;
+    const retryStrategy = (client.options as { retryStrategy: (times: number) => number | null })
+      .retryStrategy;
 
     expect(retryStrategy(5)).toBe(500);
     expect(retryStrategy(20)).toBe(2000);
@@ -61,13 +65,20 @@ describe("shared/db/redis.client", () => {
   });
 
   it("logs a warning (not an error) for ECONNREFUSED, and an error for other failures", async () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // logger.js must be imported fresh here (after vi.resetModules() in
+    // beforeEach) so it's the SAME module instance redis.client.ts resolves
+    // internally — spying on the test file's static top-level import would
+    // silently spy on a different (stale) pino instance and never see calls.
+    const { default: logger } = await import("../../../src/shared/observability/logger.js");
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => logger);
+    const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => logger);
 
     const { connectRedis } = await import("../../../src/shared/db/redis.client.js");
     const client = connectRedis() as unknown as FakeIORedis;
 
-    const refusedErr = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:6379"), { code: "ECONNREFUSED" });
+    const refusedErr = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:6379"), {
+      code: "ECONNREFUSED",
+    });
     client.emit("error", refusedErr);
     expect(warnSpy).toHaveBeenCalled();
 
@@ -76,8 +87,9 @@ describe("shared/db/redis.client", () => {
   });
 
   it("logs connect/ready/close lifecycle events without throwing", async () => {
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { default: logger } = await import("../../../src/shared/observability/logger.js");
+    const infoSpy = vi.spyOn(logger, "info").mockImplementation(() => logger);
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => logger);
 
     const { connectRedis } = await import("../../../src/shared/db/redis.client.js");
     const client = connectRedis() as unknown as FakeIORedis;
@@ -86,7 +98,7 @@ describe("shared/db/redis.client", () => {
     client.emit("ready");
     client.emit("close");
 
-    expect(logSpy).toHaveBeenCalled();
+    expect(infoSpy).toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalled();
   });
 });

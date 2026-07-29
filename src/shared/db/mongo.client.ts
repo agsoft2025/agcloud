@@ -17,6 +17,12 @@ export function getMongoClient(): MongoClient {
   return client;
 }
 
+/** Graceful-shutdown counterpart to connectMongo() — spec §6.5 requires MongoDB disconnected before process exit. */
+export async function closeMongo(): Promise<void> {
+  await client.close();
+  db = null;
+}
+
 /**
  * Create all required indexes.
  * Safe to call on every startup — MongoDB skips indexes that already exist.
@@ -38,19 +44,34 @@ export async function ensureIndexes(): Promise<void> {
       calls.createIndex({ calleeId: 1, createdAt: -1 }, { name: "callee_history" }),
       calls.createIndex({ receiverIds: 1, createdAt: -1 }, { name: "receiver_history" }),
       calls.createIndex({ status: 1 }, { name: "call_status" }),
+      // Supports the admin "active calls" listing: filter by status, sorted newest-first.
+      calls.createIndex({ status: 1, createdAt: -1 }, { name: "status_history" }),
       calls.createIndex({ roomId: 1 }, { sparse: true, name: "room_id" }),
       calls.createIndex({ egressId: 1 }, { sparse: true, name: "egress_id" }),
-      // Compound index for "active calls for a user"
+      // Unique (not just a lookup index): DB-level guard against the "simultaneous
+      // initiation" race (spec §10.2) — two concurrent POST /calls/initiate
+      // requests from the same caller both pass the in-app "already in an
+      // active call" read-then-write check before either insert lands. This
+      // index makes the second insert fail instead of silently creating two
+      // active calls for one caller; call.repository.ts's createCall() turns
+      // that failure into the same "already in an active call" response.
       calls.createIndex(
         { callerId: 1, status: 1 },
-        { name: "caller_active", partialFilterExpression: { status: { $in: ["initiated", "active"] } } }
+        {
+          name: "caller_active",
+          unique: true,
+          partialFilterExpression: { status: { $in: ["initiated", "active"] } },
+        }
       ),
     ]);
 
     const devices = database.collection("devices");
     await Promise.all([
       devices.createIndex({ userId: 1 }, { name: "user_devices" }),
-      devices.createIndex({ userId: 1, platform: 1, token: 1 }, { unique: true, name: "device_unique" }),
+      devices.createIndex(
+        { userId: 1, platform: 1, token: 1 },
+        { unique: true, name: "device_unique" }
+      ),
     ]);
 
     const refreshTokens = database.collection("refresh_tokens");
@@ -72,13 +93,19 @@ export async function ensureIndexes(): Promise<void> {
 
     const contacts = database.collection("contacts");
     await Promise.all([
-      contacts.createIndex({ ownerId: 1, contactId: 1 }, { unique: true, name: "owner_contact_unique" }),
+      contacts.createIndex(
+        { ownerId: 1, contactId: 1 },
+        { unique: true, name: "owner_contact_unique" }
+      ),
       contacts.createIndex({ contactId: 1 }, { name: "contact_watchers" }),
     ]);
 
     const blocks = database.collection("blocks");
     await Promise.all([
-      blocks.createIndex({ blockerId: 1, blockedId: 1 }, { unique: true, name: "blocker_blocked_unique" }),
+      blocks.createIndex(
+        { blockerId: 1, blockedId: 1 },
+        { unique: true, name: "blocker_blocked_unique" }
+      ),
       blocks.createIndex({ blockedId: 1 }, { name: "blocked_lookup" }),
     ]);
 

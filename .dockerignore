@@ -1,5 +1,9 @@
 node_modules
 dist
+coverage
+test
+helm
+.git
 .env
+.env.example
 npm-debug.log
-pnpm-debug.log

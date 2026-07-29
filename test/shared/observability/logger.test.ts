@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import logger from "../../../src/shared/observability/logger.js";
+import { Writable } from "node:stream";
+import pino from "pino";
+import logger, { pinoOptions } from "../../../src/shared/observability/logger.js";
+import { enterRequestContext } from "../../../src/shared/observability/request-context.js";
 
 // Real pino (as opposed to the old hand-rolled logger) writes directly to the
 // stdout file descriptor via SonicBoom rather than calling
@@ -22,10 +25,11 @@ describe("logger (default instance, LOG_LEVEL=fatal from test/setup.ts)", () => 
     expect(logger.isLevelEnabled("fatal")).toBe(true);
   });
 
-  it("exposes the service/env base bindings", () => {
+  it("exposes the service/version/env base bindings", () => {
     const bindings = logger.bindings();
     expect(bindings.service).toBe("agcloud-backend");
     expect(bindings.env).toBe("test");
+    expect(bindings.version).toBeTruthy();
   });
 
   it("exposes all levels used across the codebase as callable methods without throwing", () => {
@@ -92,5 +96,71 @@ describe("logger level filtering (module-load-time configuredLevel)", () => {
     expect(freshLogger.level).toBe("error");
     expect(freshLogger.isLevelEnabled("error")).toBe(true);
     expect(freshLogger.isLevelEnabled("warn")).toBe(false);
+  });
+});
+
+describe("logger output (spec §7.1: redaction + request correlation)", () => {
+  // pino writes via SonicBoom, not process.stdout.write, so the only
+  // reliable way to assert on actual serialized output is to build a real
+  // pino instance — using the exact same options the app uses — against an
+  // in-memory Writable instead of the default stdout destination.
+  function captureLogger(): { logger: pino.Logger; lines: () => Record<string, unknown>[] } {
+    const chunks: string[] = [];
+    const stream = new Writable({
+      write(chunk, _enc, cb) {
+        chunks.push(chunk.toString());
+        cb();
+      },
+    });
+    return {
+      logger: pino({ ...pinoOptions, level: "info" }, stream),
+      lines: () => chunks.map((c) => JSON.parse(c)),
+    };
+  }
+
+  it("redacts req.headers.authorization, req.body.password, and user.email", () => {
+    const { logger: testLogger, lines } = captureLogger();
+
+    testLogger.info(
+      {
+        req: { headers: { authorization: "Bearer secret-token" }, body: { password: "hunter2" } },
+        user: { email: "person@example.com" },
+      },
+      "test event"
+    );
+
+    const [line] = lines();
+    expect(line.req).toMatchObject({
+      headers: { authorization: "[REDACTED]" },
+      body: { password: "[REDACTED]" },
+    });
+    expect(line.user).toMatchObject({ email: "[REDACTED]" });
+  });
+
+  it("mixes the active requestId/userId from AsyncLocalStorage into every log line", async () => {
+    const { logger: testLogger, lines } = captureLogger();
+
+    await new Promise<void>((resolve) => {
+      enterRequestContext({ requestId: "req-abc", userId: "user-xyz" });
+      queueMicrotask(() => {
+        testLogger.info("inside request");
+        resolve();
+      });
+    });
+
+    const [line] = lines();
+    expect(line.requestId).toBe("req-abc");
+    expect(line.userId).toBe("user-xyz");
+  });
+
+  it("omits requestId/userId/traceId/spanId entirely when logging outside any request context", () => {
+    const { logger: testLogger, lines } = captureLogger();
+    testLogger.info("no context here");
+
+    const [line] = lines();
+    expect(line.requestId).toBeUndefined();
+    expect(line.userId).toBeUndefined();
+    expect(line.traceId).toBeUndefined();
+    expect(line.spanId).toBeUndefined();
   });
 });

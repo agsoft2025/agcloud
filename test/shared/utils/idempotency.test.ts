@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { FastifyInstance } from "fastify";
 import { getFakeRedis, resetFakes } from "../../helpers/mockDb.js";
-import { idempotency, withIdempotency } from "../../../src/shared/utils/idempotency.js";
+import { idempotency, withIdempotency, isFirstDeliveryOfEvent } from "../../../src/shared/utils/idempotency.js";
 
 describe("idempotency", () => {
   beforeEach(() => {
@@ -29,6 +29,27 @@ describe("idempotency", () => {
     it("set soft-fails (does not throw) when redis throws", async () => {
       vi.spyOn(getFakeRedis(), "set").mockRejectedValueOnce(new Error("redis down"));
       await expect(idempotency.set("key-1", { status: 200, body: {} })).resolves.toBeUndefined();
+    });
+  });
+
+  describe("isFirstDeliveryOfEvent (spec §6.2 webhook dedup)", () => {
+    it("returns true the first time an event id is seen", async () => {
+      expect(await isFirstDeliveryOfEvent("evt-1")).toBe(true);
+    });
+
+    it("returns false on a repeat delivery of the same event id", async () => {
+      await isFirstDeliveryOfEvent("evt-1");
+      expect(await isFirstDeliveryOfEvent("evt-1")).toBe(false);
+    });
+
+    it("treats different event ids independently", async () => {
+      expect(await isFirstDeliveryOfEvent("evt-a")).toBe(true);
+      expect(await isFirstDeliveryOfEvent("evt-b")).toBe(true);
+    });
+
+    it("fails open (returns true) when redis throws", async () => {
+      vi.spyOn(getFakeRedis(), "set").mockRejectedValueOnce(new Error("redis down"));
+      expect(await isFirstDeliveryOfEvent("evt-1")).toBe(true);
     });
   });
 

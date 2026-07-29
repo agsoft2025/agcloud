@@ -1,15 +1,29 @@
 import logger from "../../shared/observability/logger.js";
 import { pushNotificationsFailed, pushNotificationsSent } from "../../shared/observability/metrics.js";
 import { withRetry } from "../../shared/utils/retry.js";
+import { CircuitBreaker, CircuitOpenError } from "../../shared/utils/circuit-breaker.js";
+import { setCircuitBreakerState } from "../../shared/observability/metrics.js";
 
 export interface ApnsSendResult {
   ok: boolean;
   /** True on HTTP 410 (Gone) — the token is permanently invalid; caller should unregister the device. */
   permanentFailure?: boolean;
+  /** True when the APNs circuit breaker is OPEN — caller should fall back to the retry queue instead of dropping the notification. */
+  circuitOpen?: boolean;
 }
 
 /** Thrown for APNs errors that will never succeed on retry — a dead/unregistered device token. */
 class ApnsPermanentError extends Error {}
+
+// Spec §6.4: 50% failure rate over 60s / 10s timeout / 120s reset — same
+// consecutive-failure approximation used for LiveKit and FCM (see fcm.client.ts).
+const apnsBreaker = new CircuitBreaker({
+  name: "apns",
+  failureThreshold: 5,
+  openDurationMs: 120_000,
+  timeout: 10_000,
+  onStateChange: (state) => setCircuitBreakerState("apns", state),
+});
 
 export interface ApnsPayload {
   deviceToken: string;
@@ -89,16 +103,22 @@ export async function sendApnsNotification(payload: ApnsPayload): Promise<ApnsSe
   const topic = payload.topic ?? (pushType === "voip" ? `${bundleId}.voip` : bundleId);
 
   try {
-    await withRetry(() => sendOnce(host, topic, pushType, payload), {
-      maxAttempts: 3,
-      retryOn: (err) => !(err instanceof ApnsPermanentError),
-    });
+    await apnsBreaker.execute(() =>
+      withRetry(() => sendOnce(host, topic, pushType, payload), {
+        maxAttempts: 5,
+        maxDelayMs: 60_000,
+        retryOn: (err) => !(err instanceof ApnsPermanentError),
+      })
+    );
     pushNotificationsSent.inc({ platform: "apns" });
     return { ok: true };
   } catch (err) {
     pushNotificationsFailed.inc({ platform: "apns" });
     if (err instanceof ApnsPermanentError) {
       return { ok: false, permanentFailure: true };
+    }
+    if (err instanceof CircuitOpenError) {
+      return { ok: false, circuitOpen: true };
     }
     logger.error({ err }, "APNs send exception");
     return { ok: false };

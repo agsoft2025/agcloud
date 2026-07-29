@@ -1,12 +1,16 @@
 import { ObjectId } from "mongodb";
 import { signAccessToken } from "../../src/shared/security/jwt.js";
 
-export function mintAccessToken(userId: string, email: string): string {
-  return signAccessToken(userId, email);
+export function mintAccessToken(userId: string, email: string, role: string = "user"): string {
+  return signAccessToken(userId, email, role);
 }
 
-export function authHeader(userId: string, email: string): { authorization: string } {
-  return { authorization: `Bearer ${mintAccessToken(userId, email)}` };
+export function authHeader(
+  userId: string,
+  email: string,
+  role: string = "user"
+): { authorization: string } {
+  return { authorization: `Bearer ${mintAccessToken(userId, email, role)}` };
 }
 
 export function makeUserDoc(overrides: Record<string, unknown> = {}) {

@@ -2,12 +2,17 @@ import logger from "../observability/logger.js";
 
 type State = "CLOSED" | "OPEN" | "HALF_OPEN";
 
+/** Thrown by `execute()` when the breaker is OPEN — callers can distinguish a fast-fail from a real error (e.g. to reroute to a fallback queue). */
+export class CircuitOpenError extends Error {}
+
 export interface CircuitBreakerOptions {
   name: string;
   failureThreshold?: number;   // failures before opening (default 5)
   successThreshold?: number;   // successes in HALF_OPEN to close (default 2)
   openDurationMs?: number;     // how long to stay OPEN before trying HALF_OPEN (default 30s)
   timeout?: number;            // per-call timeout in ms (default: none)
+  /** Called on every state transition (and once at construction with the initial CLOSED state) — wire to a metrics gauge without this generic utility depending on prom-client directly. */
+  onStateChange?: (state: State) => void;
 }
 
 export class CircuitBreaker {
@@ -21,6 +26,7 @@ export class CircuitBreaker {
   private readonly successThreshold: number;
   private readonly openDurationMs: number;
   private readonly timeout: number | undefined;
+  private readonly onStateChange: ((state: State) => void) | undefined;
 
   constructor(options: CircuitBreakerOptions) {
     this.name = options.name;
@@ -28,6 +34,8 @@ export class CircuitBreaker {
     this.successThreshold = options.successThreshold ?? 2;
     this.openDurationMs = options.openDurationMs ?? 30_000;
     this.timeout = options.timeout;
+    this.onStateChange = options.onStateChange;
+    this.onStateChange?.(this.state);
   }
 
   /** Execute `fn` through the circuit breaker. */
@@ -35,7 +43,7 @@ export class CircuitBreaker {
     this.transitionIfNeeded();
 
     if (this.state === "OPEN") {
-      throw new Error(`Circuit breaker [${this.name}] is OPEN — request rejected`);
+      throw new CircuitOpenError(`Circuit breaker [${this.name}] is OPEN — request rejected`);
     }
 
     try {
@@ -65,6 +73,7 @@ export class CircuitBreaker {
       this.state = "HALF_OPEN";
       this.successCount = 0;
       logger.info({ breaker: this.name }, "Circuit breaker → HALF_OPEN");
+      this.onStateChange?.(this.state);
     }
   }
 
@@ -75,6 +84,7 @@ export class CircuitBreaker {
       if (this.successCount >= this.successThreshold) {
         this.state = "CLOSED";
         logger.info({ breaker: this.name }, "Circuit breaker → CLOSED");
+        this.onStateChange?.(this.state);
       }
     }
   }
@@ -85,6 +95,7 @@ export class CircuitBreaker {
       this.state = "OPEN";
       this.lastOpenedAt = Date.now();
       logger.warn({ breaker: this.name, failures: this.failureCount, err }, "Circuit breaker → OPEN");
+      this.onStateChange?.(this.state);
     }
   }
 

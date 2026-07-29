@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import "../../helpers/mockLivekit.js";
 import { livekitMocks } from "../../helpers/mockLivekit.js";
+import logger from "../../../src/shared/observability/logger.js";
 import {
   startRoomRecording,
   stopRecording,
@@ -27,7 +28,11 @@ describe("livekit.service", () => {
   it("startRoomRecording delegates to the egress client", async () => {
     const result = await startRoomRecording("room-1", { filepath: "/tmp/x.mp4" });
     expect(result).toEqual({ egressId: "egress-123" });
-    expect(livekitMocks.startRoomCompositeEgress).toHaveBeenCalledWith("room-1", { filepath: "/tmp/x.mp4" }, {});
+    expect(livekitMocks.startRoomCompositeEgress).toHaveBeenCalledWith(
+      "room-1",
+      { filepath: "/tmp/x.mp4" },
+      {}
+    );
   });
 
   it("stopRecording delegates to the egress client", async () => {
@@ -42,7 +47,7 @@ describe("livekit.service", () => {
   });
 
   it("endLiveKitRoom swallows a delete failure and warns instead of throwing", async () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => logger);
     livekitMocks.deleteRoom.mockRejectedValueOnce(new Error("room not found"));
 
     await expect(endLiveKitRoom("missing-room")).resolves.toBeUndefined();
@@ -59,7 +64,7 @@ describe("livekit.service", () => {
   });
 
   it("checkLiveKitHealth returns false and logs when listRooms fails", async () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => logger);
     livekitMocks.listRooms.mockRejectedValueOnce(new Error("unreachable"));
 
     expect(await checkLiveKitHealth()).toBe(false);

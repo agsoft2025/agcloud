@@ -1,13 +1,14 @@
 import { describe, it, expect, afterEach } from "vitest";
 import Fastify, { FastifyInstance } from "fastify";
 import { registerRequestId } from "../../../src/shared/middleware/request-id.js";
+import { getRequestContext } from "../../../src/shared/observability/request-context.js";
 
 async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
   registerRequestId(app);
 
   app.get("/whoami", async (request) => {
-    return { requestId: (request as any).requestId };
+    return { requestId: (request as any).requestId, context: getRequestContext() };
   });
 
   await app.ready();
@@ -66,5 +67,16 @@ describe("registerRequestId", () => {
 
     expect(response.headers["x-request-id"]).toBe("request-wins");
     expect(JSON.parse(response.payload).requestId).toBe("request-wins");
+  });
+
+  it("populates the AsyncLocalStorage request context so logger.ts's mixin can pick it up", async () => {
+    app = await buildApp();
+    const response = await app.inject({
+      method: "GET",
+      url: "/whoami",
+      headers: { "x-request-id": "ctx-id-789" },
+    });
+
+    expect(JSON.parse(response.payload).context).toEqual({ requestId: "ctx-id-789" });
   });
 });

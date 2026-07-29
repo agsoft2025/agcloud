@@ -21,6 +21,29 @@ export interface IdempotencyRecord {
 
 const TTL_SECONDS = 86_400; // 24 h
 
+/**
+ * Spec §6.2: "Webhook handlers | Event ID dedup in Redis (24h)". Distinct
+ * from the client-driven Idempotency-Key flow below — a webhook provider
+ * (LiveKit) redelivers the same event on timeout/5xx, so this is a
+ * see-it-once guard keyed by the event's own id, not a response cache.
+ *
+ * Returns true the first time an id is seen (caller should process the
+ * event), false on a repeat delivery (caller should skip it). Fails open
+ * (returns true — process it) on a Redis error, since dropping a webhook
+ * outright is worse than the small chance of double-processing during an
+ * outage.
+ */
+export async function isFirstDeliveryOfEvent(eventId: string): Promise<boolean> {
+  try {
+    const redis = getRedisClient();
+    const result = await redis.set(`idempotency:webhook:${eventId}`, "1", "EX", TTL_SECONDS, "NX");
+    return result === "OK";
+  } catch (err) {
+    logger.warn({ err, eventId }, "Webhook dedup check failed — processing the event anyway");
+    return true;
+  }
+}
+
 export const idempotency = {
   async get(key: string): Promise<IdempotencyRecord | null> {
     try {

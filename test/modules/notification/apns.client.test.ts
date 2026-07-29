@@ -89,7 +89,7 @@ describe("apns.client", () => {
       const { sendApnsNotification } = await import("../../../src/modules/notification/apns.client.js");
       const result = await sendApnsNotification({ deviceToken: "tok-1" });
       expect(result).toEqual({ ok: false });
-      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(fetch).toHaveBeenCalledTimes(5);
     });
 
     it("returns { ok: false } when fetch throws", async () => {
@@ -97,6 +97,28 @@ describe("apns.client", () => {
       const { sendApnsNotification } = await import("../../../src/modules/notification/apns.client.js");
       const result = await sendApnsNotification({ deviceToken: "tok-1" });
       expect(result).toEqual({ ok: false });
+    });
+
+    it("opens the circuit breaker after repeated failures and fast-fails with circuitOpen", async () => {
+      (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: false,
+        status: 410,
+        json: async () => ({ reason: "Unregistered" }),
+      });
+      const { sendApnsNotification } = await import("../../../src/modules/notification/apns.client.js");
+
+      // failureThreshold: 5 — each of these is a single-attempt permanent
+      // failure (no retry), so this stays fast.
+      for (let i = 0; i < 5; i++) {
+        const result = await sendApnsNotification({ deviceToken: `tok-${i}` });
+        expect(result).toEqual({ ok: false, permanentFailure: true });
+      }
+
+      const callsBeforeOpen = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
+
+      const result = await sendApnsNotification({ deviceToken: "tok-blocked" });
+      expect(result).toEqual({ ok: false, circuitOpen: true });
+      expect((fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsBeforeOpen);
     });
 
     it("returns { ok: false } when credentials are only partially configured", async () => {

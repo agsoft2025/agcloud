@@ -9,11 +9,18 @@ import healthRoutes, { healthCheckRoutes } from "./modules/health/health.routes.
 import livekitRoutes from "./modules/livekit/livekit.routes.js";
 import userRoutes from "./modules/user/user.routes.js";
 import notificationRoutes from "./modules/notification/notification.routes.js";
+import adminRoutes from "./modules/admin/admin.routes.js";
 import { activityMiddleware } from "./shared/middleware/activity.middleware.js";
 import { registerRateLimiting } from "./shared/middleware/rate-limit.middleware.js";
 import { registerRequestId } from "./shared/middleware/request-id.js";
 import { registerErrorHandler } from "./shared/middleware/error-handler.js";
-import { getMetrics, getMetricsContentType, httpRequestsTotal, httpRequestDuration } from "./shared/observability/metrics.js";
+import {
+  getMetrics,
+  getMetricsContentType,
+  httpRequestsTotal,
+  httpRequestDuration,
+  httpRequestsInFlight,
+} from "./shared/observability/metrics.js";
 import logger from "./shared/observability/logger.js";
 import config from "./config/index.js";
 import { fastifyCorsOriginCallback } from "./shared/security/cors.js";
@@ -22,6 +29,15 @@ function isFastifyVersionMismatch(error: unknown): boolean {
   return error instanceof Error && error.message.includes("expected '5.x' fastify version");
 }
 
+/**
+ * These three plugins are all security controls (security headers, request
+ * rate limiting, and raw-body capture for LiveKit webhook HMAC verification).
+ * A Fastify version mismatch must never silently disable a security control
+ * in production — that would start the app "successfully" with no headers,
+ * no rate limiting, and unverifiable webhooks, and nothing short of reading
+ * logs would reveal it. So this only tolerates the skip-and-warn outcome
+ * outside production; in production a mismatch is a hard startup failure.
+ */
 async function registerFastify4OptionalPlugin(
   pluginName: string,
   register: () => PromiseLike<unknown>
@@ -30,6 +46,10 @@ async function registerFastify4OptionalPlugin(
     await register();
   } catch (error) {
     if (!isFastifyVersionMismatch(error)) {
+      throw error;
+    }
+
+    if (config.env === "production") {
       throw error;
     }
 
@@ -103,6 +123,9 @@ export async function buildApp() {
   app.addHook("onResponse", activityMiddleware);
 
   // HTTP request metrics — route pattern (not raw URL) keeps label cardinality bounded.
+  app.addHook("onRequest", async () => {
+    httpRequestsInFlight.inc();
+  });
   app.addHook("onResponse", async (request, reply) => {
     const labels = {
       method: request.method,
@@ -111,6 +134,7 @@ export async function buildApp() {
     };
     httpRequestsTotal.inc(labels);
     httpRequestDuration.observe(labels, reply.elapsedTime / 1000);
+    httpRequestsInFlight.dec();
   });
 
   // Prometheus metrics
@@ -127,6 +151,7 @@ export async function buildApp() {
   await app.register(userRoutes, { prefix: "/users" });
   await app.register(livekitRoutes, { prefix: "/livekit" });
   await app.register(notificationRoutes, { prefix: "/devices" });
+  await app.register(adminRoutes, { prefix: "/admin" });
 
   // Error handler (must be registered last)
   registerErrorHandler(app);

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { CircuitBreaker } from "../../../src/shared/utils/circuit-breaker.js";
+import { CircuitBreaker, CircuitOpenError } from "../../../src/shared/utils/circuit-breaker.js";
 
 describe("CircuitBreaker", () => {
   beforeEach(() => {
@@ -43,6 +43,14 @@ describe("CircuitBreaker", () => {
     const neverCalled = vi.fn().mockResolvedValue("should not run");
     await expect(breaker.execute(neverCalled)).rejects.toThrow(/is OPEN/);
     expect(neverCalled).not.toHaveBeenCalled();
+  });
+
+  it("rejects with a CircuitOpenError instance once OPEN, distinct from the underlying failure", async () => {
+    const breaker = new CircuitBreaker({ name: "test", failureThreshold: 1 });
+    await expect(breaker.execute(async () => { throw new Error("boom"); })).rejects.toThrow("boom");
+    expect(breaker.currentState).toBe("OPEN");
+
+    await expect(breaker.execute(async () => "unreachable")).rejects.toBeInstanceOf(CircuitOpenError);
   });
 
   it("transitions to HALF_OPEN after openDurationMs elapses", async () => {
@@ -140,5 +148,38 @@ describe("CircuitBreaker", () => {
     await expect(breaker.execute(failingFn)).rejects.toThrow();
     expect(breaker.currentState).toBe("OPEN");
     expect(failingFn).toHaveBeenCalledTimes(5);
+  });
+
+  describe("onStateChange", () => {
+    it("is called once at construction with the initial CLOSED state", () => {
+      const onStateChange = vi.fn();
+      new CircuitBreaker({ name: "test", onStateChange });
+      expect(onStateChange).toHaveBeenCalledTimes(1);
+      expect(onStateChange).toHaveBeenCalledWith("CLOSED");
+    });
+
+    it("is called on every transition: CLOSED -> OPEN -> HALF_OPEN -> CLOSED", async () => {
+      const onStateChange = vi.fn();
+      const breaker = new CircuitBreaker({
+        name: "test",
+        failureThreshold: 1,
+        successThreshold: 1,
+        openDurationMs: 1000,
+        onStateChange,
+      });
+      onStateChange.mockClear(); // drop the construction-time CLOSED call
+
+      await expect(breaker.execute(async () => { throw new Error("boom"); })).rejects.toThrow();
+      expect(onStateChange).toHaveBeenLastCalledWith("OPEN");
+
+      vi.advanceTimersByTime(1000);
+      expect(breaker.currentState).toBe("HALF_OPEN");
+      expect(onStateChange).toHaveBeenLastCalledWith("HALF_OPEN");
+
+      await breaker.execute(async () => "ok");
+      expect(onStateChange).toHaveBeenLastCalledWith("CLOSED");
+
+      expect(onStateChange).toHaveBeenCalledTimes(3);
+    });
   });
 });

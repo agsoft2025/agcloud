@@ -1,12 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const connectMock = vi.fn().mockResolvedValue(undefined);
+const closeMock = vi.fn().mockResolvedValue(undefined);
 const createIndexMock = vi.fn().mockResolvedValue("index_name");
 const collectionMock = vi.fn(() => ({ createIndex: createIndexMock }));
 const dbMock = vi.fn(() => ({ collection: collectionMock }));
 
 class FakeMongoClient {
   connect = connectMock;
+  close = closeMock;
   db = dbMock;
 }
 
@@ -22,6 +24,7 @@ describe("shared/db/mongo.client", () => {
   beforeEach(() => {
     vi.resetModules();
     connectMock.mockClear();
+    closeMock.mockClear();
     createIndexMock.mockClear();
     collectionMock.mockClear();
     dbMock.mockClear();
@@ -62,5 +65,20 @@ describe("shared/db/mongo.client", () => {
     createIndexMock.mockRejectedValueOnce(new Error("index conflict"));
     const { ensureIndexes } = await import("../../../src/shared/db/mongo.client.js");
     await expect(ensureIndexes()).resolves.toBeUndefined();
+  });
+
+  it("closeMongo closes the underlying client", async () => {
+    const { connectMongo, closeMongo } = await import("../../../src/shared/db/mongo.client.js");
+    await connectMongo();
+    await closeMongo();
+    expect(closeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("closeMongo lets a subsequent connectMongo reconnect (cached db handle is cleared)", async () => {
+    const { connectMongo, closeMongo } = await import("../../../src/shared/db/mongo.client.js");
+    await connectMongo();
+    await closeMongo();
+    await connectMongo();
+    expect(connectMock).toHaveBeenCalledTimes(2);
   });
 });

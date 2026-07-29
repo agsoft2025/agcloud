@@ -1,3 +1,7 @@
+/* eslint-disable no-console -- this file must be side-effect-free of any
+   other module's import graph until `sdk.start()` runs (see below), so it
+   deliberately does not pull in the shared pino logger the rest of the app
+   uses; that import-order guarantee is worth more here than log consistency. */
 /**
  * OpenTelemetry distributed tracing.
  *
@@ -37,8 +41,7 @@ if (otlpEndpoint) {
       getNodeAutoInstrumentations({
         "@opentelemetry/instrumentation-http": {
           // The liveness probe fires every few seconds and is noise, not a trace worth keeping.
-          ignoreIncomingRequestHook: (req) =>
-            req.url === "/live" || req.url === "/health/live",
+          ignoreIncomingRequestHook: (req) => req.url === "/live" || req.url === "/health/live",
         },
         // fs instrumentation is extremely high-volume and rarely useful for an API server.
         "@opentelemetry/instrumentation-fs": { enabled: false },

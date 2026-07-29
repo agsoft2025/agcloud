@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildTestApp } from "../../helpers/buildTestApp.js";
 import { getFakeDb, resetFakes } from "../../helpers/mockDb.js";
-import logger from "../../../src/shared/observability/logger.js";
+import { setEmailProvider } from "../../../src/shared/email/email.service.js";
+import type { EmailMessage } from "../../../src/shared/email/email.provider.js";
 
 describe("Auth Routes", () => {
   let app: FastifyInstance;
@@ -49,7 +50,9 @@ describe("Auth Routes", () => {
     });
 
     it("returns 500 when insertOne throws an unexpected error", async () => {
-      vi.spyOn(getFakeDb().collection("users"), "insertOne").mockRejectedValueOnce(new Error("db down"));
+      vi.spyOn(getFakeDb().collection("users"), "insertOne").mockRejectedValueOnce(
+        new Error("db down")
+      );
       const response = await app.inject({ method: "POST", url: "/auth/signup", payload: testUser });
       expect(response.statusCode).toBe(500);
     });
@@ -98,7 +101,9 @@ describe("Auth Routes", () => {
     it("rehashes a legacy bcrypt password to argon2id on successful login", async () => {
       const bcrypt = await import("bcrypt");
       const legacyHash = await bcrypt.hash(testUser.password, 10);
-      await getFakeDb().collection("users").updateOne({ email: testUser.email }, { $set: { passwordHash: legacyHash } });
+      await getFakeDb()
+        .collection("users")
+        .updateOne({ email: testUser.email }, { $set: { passwordHash: legacyHash } });
 
       const response = await app.inject({
         method: "POST",
@@ -112,7 +117,9 @@ describe("Auth Routes", () => {
     });
 
     it("returns 500 on an unexpected error", async () => {
-      vi.spyOn(getFakeDb().collection("users"), "findOne").mockRejectedValueOnce(new Error("db down"));
+      vi.spyOn(getFakeDb().collection("users"), "findOne").mockRejectedValueOnce(
+        new Error("db down")
+      );
       const response = await app.inject({
         method: "POST",
         url: "/auth/signin",
@@ -137,7 +144,11 @@ describe("Auth Routes", () => {
     });
 
     it("GET /auth/me returns the current user when authenticated", async () => {
-      const response = await app.inject({ method: "GET", url: "/auth/me", headers: { cookie: tokenCookie } });
+      const response = await app.inject({
+        method: "GET",
+        url: "/auth/me",
+        headers: { cookie: tokenCookie },
+      });
       expect(response.statusCode).toBe(200);
       expect(JSON.parse(response.payload).email).toBe(testUser.email);
     });
@@ -149,19 +160,33 @@ describe("Auth Routes", () => {
 
     it("GET /auth/me returns 401 and clears the cookie when the user no longer exists", async () => {
       await getFakeDb().collection("users").deleteOne({ email: testUser.email });
-      const response = await app.inject({ method: "GET", url: "/auth/me", headers: { cookie: tokenCookie } });
+      const response = await app.inject({
+        method: "GET",
+        url: "/auth/me",
+        headers: { cookie: tokenCookie },
+      });
       expect(response.statusCode).toBe(401);
       expect(response.headers["set-cookie"]).toBeDefined();
     });
 
     it("GET /auth/me returns 500 on an unexpected error", async () => {
-      vi.spyOn(getFakeDb().collection("users"), "findOne").mockRejectedValueOnce(new Error("db down"));
-      const response = await app.inject({ method: "GET", url: "/auth/me", headers: { cookie: tokenCookie } });
+      vi.spyOn(getFakeDb().collection("users"), "findOne").mockRejectedValueOnce(
+        new Error("db down")
+      );
+      const response = await app.inject({
+        method: "GET",
+        url: "/auth/me",
+        headers: { cookie: tokenCookie },
+      });
       expect(response.statusCode).toBe(500);
     });
 
     it("GET /auth/sessions lists the active session", async () => {
-      const response = await app.inject({ method: "GET", url: "/auth/sessions", headers: { cookie: tokenCookie } });
+      const response = await app.inject({
+        method: "GET",
+        url: "/auth/sessions",
+        headers: { cookie: tokenCookie },
+      });
       expect(response.statusCode).toBe(200);
       const body = JSON.parse(response.payload);
       expect(body.sessions).toHaveLength(1);
@@ -169,7 +194,11 @@ describe("Auth Routes", () => {
     });
 
     it("DELETE /auth/sessions/:familyId revokes that session", async () => {
-      const list = await app.inject({ method: "GET", url: "/auth/sessions", headers: { cookie: tokenCookie } });
+      const list = await app.inject({
+        method: "GET",
+        url: "/auth/sessions",
+        headers: { cookie: tokenCookie },
+      });
       const { familyId } = JSON.parse(list.payload).sessions[0];
 
       const response = await app.inject({
@@ -188,16 +217,28 @@ describe("Auth Routes", () => {
     });
 
     it("POST /auth/logout-all revokes every session and denylists the current access token", async () => {
-      const response = await app.inject({ method: "POST", url: "/auth/logout-all", headers: { cookie: tokenCookie } });
+      const response = await app.inject({
+        method: "POST",
+        url: "/auth/logout-all",
+        headers: { cookie: tokenCookie },
+      });
       expect(response.statusCode).toBe(200);
 
       // The very token used to call logout-all is immediately denylisted too.
-      const me = await app.inject({ method: "GET", url: "/auth/me", headers: { cookie: tokenCookie } });
+      const me = await app.inject({
+        method: "GET",
+        url: "/auth/me",
+        headers: { cookie: tokenCookie },
+      });
       expect(me.statusCode).toBe(401);
     });
 
     it("POST /auth/signout clears cookies", async () => {
-      const response = await app.inject({ method: "POST", url: "/auth/signout", headers: { cookie: tokenCookie } });
+      const response = await app.inject({
+        method: "POST",
+        url: "/auth/signout",
+        headers: { cookie: tokenCookie },
+      });
       expect(response.statusCode).toBe(200);
       expect(response.headers["set-cookie"]).toBeDefined();
     });
@@ -237,7 +278,11 @@ describe("Auth Routes", () => {
       // First use rotates it away.
       await app.inject({ method: "POST", url: "/auth/refresh", payload: { refreshToken } });
       // Reusing the now-superseded token must be treated as theft.
-      const reuse = await app.inject({ method: "POST", url: "/auth/refresh", payload: { refreshToken } });
+      const reuse = await app.inject({
+        method: "POST",
+        url: "/auth/refresh",
+        payload: { refreshToken },
+      });
 
       expect(reuse.statusCode).toBe(401);
       expect(JSON.parse(reuse.payload).message).toContain("Security alert");
@@ -279,10 +324,21 @@ describe("Auth Routes", () => {
   });
 
   describe("POST /auth/forgot-password + /auth/reset-password", () => {
-    it("resets the password with the token issued via the dev-mode log line", async () => {
+    afterEach(() => {
+      // Detach the capturing provider so it doesn't leak into other tests
+      // in this file that also trigger /auth/forgot-password.
+      setEmailProvider({ async send() {} });
+    });
+
+    it("dispatches a reset email and resets the password with its token", async () => {
       await app.inject({ method: "POST", url: "/auth/signup", payload: testUser });
 
-      const debugSpy = vi.spyOn(logger, "debug");
+      const sent: EmailMessage[] = [];
+      setEmailProvider({
+        async send(message: EmailMessage) {
+          sent.push(message);
+        },
+      });
 
       const forgot = await app.inject({
         method: "POST",
@@ -292,10 +348,11 @@ describe("Auth Routes", () => {
       expect(forgot.statusCode).toBe(200);
       expect(JSON.parse(forgot.payload).message).toContain("sent");
 
-      const calls = debugSpy.mock.calls as unknown as Array<[Record<string, unknown>, string]>;
-      const call = calls.find((c) => c[1]?.includes("[DEV] Password reset token"));
-      expect(call).toBeDefined();
-      const resetToken = call![0].resetToken as string;
+      expect(sent).toHaveLength(1);
+      expect(sent[0].to).toBe(testUser.email);
+      const resetUrlMatch = sent[0].text.match(/token=([^\s]+)/);
+      expect(resetUrlMatch).not.toBeNull();
+      const resetToken = resetUrlMatch![1];
       expect(resetToken).toBeTruthy();
 
       const reset = await app.inject({
@@ -336,5 +393,64 @@ describe("Auth Routes", () => {
 
   it("exposes the fake db for direct inspection when needed", () => {
     expect(getFakeDb()).toBeDefined();
+  });
+
+  describe("rate limiting (spec §5.4)", () => {
+    it("signin: allows 5 requests per minute per IP and 429s the 6th", async () => {
+      for (let i = 0; i < 5; i++) {
+        const response = await app.inject({
+          method: "POST",
+          url: "/auth/signin",
+          payload: { email: "nobody@example.com", password: "whatever123" },
+        });
+        expect(response.statusCode).not.toBe(429);
+      }
+      const sixth = await app.inject({
+        method: "POST",
+        url: "/auth/signin",
+        payload: { email: "nobody@example.com", password: "whatever123" },
+      });
+      expect(sixth.statusCode).toBe(429);
+    });
+
+    it("signup: allows 3 requests per minute per IP and 429s the 4th", async () => {
+      for (let i = 0; i < 3; i++) {
+        const response = await app.inject({
+          method: "POST",
+          url: "/auth/signup",
+          payload: { email: `user${i}@example.com`, password: "password123", displayName: "U" },
+        });
+        expect(response.statusCode).not.toBe(429);
+      }
+      const fourth = await app.inject({
+        method: "POST",
+        url: "/auth/signup",
+        payload: { email: "user4@example.com", password: "password123", displayName: "U" },
+      });
+      expect(fourth.statusCode).toBe(429);
+    });
+
+    it("forgot-password: keys the limit by email, not IP — a second email from the same IP is unaffected", async () => {
+      const first = await app.inject({
+        method: "POST",
+        url: "/auth/forgot-password",
+        payload: { email: "a@example.com" },
+      });
+      expect(first.statusCode).toBe(200);
+
+      const repeat = await app.inject({
+        method: "POST",
+        url: "/auth/forgot-password",
+        payload: { email: "a@example.com" },
+      });
+      expect(repeat.statusCode).toBe(429);
+
+      const differentEmail = await app.inject({
+        method: "POST",
+        url: "/auth/forgot-password",
+        payload: { email: "b@example.com" },
+      });
+      expect(differentEmail.statusCode).toBe(200);
+    });
   });
 });
