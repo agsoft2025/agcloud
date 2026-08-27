@@ -24,6 +24,9 @@ import {
 } from "../../shared/observability/metrics.js";
 import logger from "../../shared/observability/logger.js";
 import config from "../../config/index.js";
+import { scheduleBillingTimers, cancelBillingTimers, getBillingTimerOptions } from "../billing/billing.timers.js";
+import { BillingSettingsRepository } from "../billing/billing-settings.repository.js";
+import { calculateAndSaveCharge } from "../billing/billing.service.js";
 
 // Spec §5.4: 10 req/min per user (not per IP — callers behind a shared IP
 // must not share this budget). `hook: "preHandler"` runs this after the
@@ -40,9 +43,10 @@ const initiateRateLimitConfig = {
 };
 
 const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
-  const callRepo = new CallRepository();
-  const userRepo = new UserRepository();
-  const blockRepo = new BlockRepository();
+  const callRepo            = new CallRepository();
+  const userRepo            = new UserRepository();
+  const blockRepo           = new BlockRepository();
+  const billingSettingsRepo = new BillingSettingsRepository();
 
   // List endpoint for testing in postman
   app.get("/", async () => {
@@ -385,6 +389,32 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       callRecord.status = "active";
       void cancelCallTimeout(id);
       callsAccepted.inc();
+
+      // Schedule free-minute billing timers (settings from DB, default 1 min free + 60 s grace)
+      const billingSettings = await billingSettingsRepo.getSettings();
+      const billingOptions = {
+        freeSeconds:        billingSettings.freeMinutes * 60,
+        gracePeriodSeconds: billingSettings.gracePeriodSeconds,
+      };
+      const allParticipantIds = [callRecord.callerId, ...callRecord.receiverIds];
+      scheduleBillingTimers(id, allParticipantIds, async () => {
+        // Cutoff: force-end the call server-side after grace period
+        try {
+          await callRepo.updateCallStatus(id, "ended");
+          await callRepo.markPendingParticipantsAs(id, "missed");
+          const cutoffRecord = await callRepo.getCallById(id);
+          if (cutoffRecord?.startedAt) {
+            void calculateAndSaveCharge(id, {
+              callerId:            callRecord.callerId,
+              calleeIds:           callRecord.receiverIds,
+              callType:            callRecord.callType,
+              startedAt:           cutoffRecord.startedAt,
+              endedAt:             new Date(),
+              freeSecondsOverride: billingOptions.freeSeconds,
+            });
+          }
+        } catch (_err) { /* logged inside calculateAndSaveCharge */ }
+      }, billingOptions);
     }
 
     // Mark this participant as joined (works for first-time accepts, re-invites,
@@ -521,6 +551,7 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     await callRepo.updateCallStatus(id, "cancelled");
     await callRepo.markPendingParticipantsAs(id, "cancelled");
     await cancelCallTimeout(id);
+    cancelBillingTimers(id);
     await endLiveKitRoom(callRecord.roomId || id);
 
     for (const receiverId of callRecord.receiverIds) {
@@ -587,8 +618,22 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       // Last participant left — end the call and clean up the LiveKit room.
       await callRepo.updateCallStatus(id, "ended");
       await callRepo.markPendingParticipantsAs(id, "missed");
+      cancelBillingTimers(id);
       await endLiveKitRoom(roomId);
       callsEnded.inc();
+      // Calculate charges for time beyond the free period (fire-and-forget)
+      const liveCall = await callRepo.getCallById(id);
+      if (liveCall?.startedAt) {
+        const timerOptsLeave = getBillingTimerOptions(id);
+        void calculateAndSaveCharge(id, {
+          callerId:            callRecord.callerId,
+          calleeIds:           callRecord.receiverIds,
+          callType:            callRecord.callType,
+          startedAt:           liveCall.startedAt,
+          endedAt:             new Date(),
+          freeSecondsOverride: timerOptsLeave?.freeSeconds,
+        });
+      }
       logger.info({ callId: id, userId }, "Last participant left — call ended");
     } else {
       // Others remain — notify them so they can update participant lists.
@@ -642,8 +687,22 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     await callRepo.updateCallStatus(id, "ended");
     await callRepo.markPendingParticipantsAs(id, "missed");
     await cancelCallTimeout(id);
+    cancelBillingTimers(id);
     await endLiveKitRoom(callRecord.roomId || id);
     callsEnded.inc();
+
+    // Calculate charges for time beyond the free period (fire-and-forget)
+    if (callRecord.startedAt) {
+      const timerOpts = getBillingTimerOptions(id);
+      void calculateAndSaveCharge(id, {
+        callerId:            callRecord.callerId,
+        calleeIds:           callRecord.receiverIds,
+        callType:            callRecord.callType,
+        startedAt:           callRecord.startedAt,
+        endedAt:             new Date(),
+        freeSecondsOverride: timerOpts?.freeSeconds,
+      });
+    }
 
     // Notify all other participants that the call has ended (this also clears
     // any pending invitations they may still be showing for this call).
