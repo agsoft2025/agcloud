@@ -45,7 +45,7 @@ export function scheduleBillingTimers(
       emitToUser(userId, "call:billing:warning", {
         callId,
         gracePeriodSeconds,
-        message: "Your free call limit is over. Please pay to continue.",
+        message: "Your free call limit is over. Please subscribe to continue.",
       });
     }
   }, freeSeconds * 1_000);

@@ -10,6 +10,7 @@ import livekitRoutes from "./modules/livekit/livekit.routes.js";
 import userRoutes from "./modules/user/user.routes.js";
 import notificationRoutes from "./modules/notification/notification.routes.js";
 import adminRoutes from "./modules/admin/admin.routes.js";
+import subscriptionRoutes from "./modules/subscription/subscription.routes.js";
 import { activityMiddleware } from "./shared/middleware/activity.middleware.js";
 import { registerRateLimiting } from "./shared/middleware/rate-limit.middleware.js";
 import { registerRequestId } from "./shared/middleware/request-id.js";
@@ -151,7 +152,8 @@ export async function buildApp() {
   await app.register(userRoutes, { prefix: "/users" });
   await app.register(livekitRoutes, { prefix: "/livekit" });
   await app.register(notificationRoutes, { prefix: "/devices" });
-  await app.register(adminRoutes, { prefix: "/admin" });
+  await app.register(adminRoutes,        { prefix: "/admin" });
+  await app.register(subscriptionRoutes, { prefix: "/subscriptions" });
 
   // Error handler (must be registered last)
   registerErrorHandler(app);

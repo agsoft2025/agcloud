@@ -11,12 +11,15 @@ const DEFAULTS: BillingSettings = {
 };
 
 export class BillingSettingsRepository {
-  private collection = connectMongo().then((db) =>
-    db.collection<BillingSettings & { _id: string }>("billing_settings"),
-  );
+  /** Lazily resolve the collection on each call — avoids permanently-rejected
+   * promise if connectMongo() is called before the DB is ready at startup. */
+  private async col() {
+    const db = await connectMongo();
+    return db.collection<BillingSettings & { _id: string }>("billing_settings");
+  }
 
   async getSettings(): Promise<BillingSettings> {
-    const col = await this.collection;
+    const col = await this.col();
     const doc = await col.findOne({ _id: "singleton" } as object);
     if (!doc) return { ...DEFAULTS };
     return {
@@ -26,7 +29,7 @@ export class BillingSettingsRepository {
   }
 
   async updateSettings(patch: Partial<BillingSettings>): Promise<BillingSettings> {
-    const col = await this.collection;
+    const col = await this.col();
     const result = await col.findOneAndUpdate(
       { _id: "singleton" } as object,
       { $set: patch },

@@ -4,8 +4,11 @@ import { CallRepository } from "../call/call.repository.js";
 import { PricingRepository } from "../pricing/pricing.repository.js";
 import { BillingRepository } from "../billing/billing.repository.js";
 import { BillingSettingsRepository } from "../billing/billing-settings.repository.js";
+import { SubscriptionPlanRepository } from "../subscription/subscription-plan.repository.js";
 import { createRateSchema, updateRateSchema } from "../pricing/pricing.schemas.js";
 import type { PricingRateDocument } from "../pricing/pricing.schemas.js";
+import { createPlanSchema, updatePlanSchema } from "../subscription/subscription.schemas.js";
+import type { SubscriptionPlanDocument } from "../subscription/subscription.schemas.js";
 import { authenticate, requireRole } from "../../shared/middleware/auth.middleware.js";
 import { writeAuditLog } from "../../shared/security/audit-log.js";
 
@@ -19,6 +22,7 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   const pricingRepo         = new PricingRepository();
   const billingRepo         = new BillingRepository();
   const billingSettingsRepo = new BillingSettingsRepository();
+  const subPlanRepo         = new SubscriptionPlanRepository();
 
   // ── Active calls ─────────────────────────────────────────────────────────
 
@@ -229,6 +233,92 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       }
       const updated = await billingSettingsRepo.updateSettings(body);
       return reply.send(updated);
+    },
+  );
+  // ── Subscription plans: admin CRUD ───────────────────────────────────────
+  // Admins manage plan definitions; users subscribe via /subscriptions routes.
+
+  const fmtPlan = (p: SubscriptionPlanDocument) => ({
+    id:             p._id.toString(),
+    name:           p.name,
+    durationMonths: p.durationMonths,
+    price:          p.price,
+    currency:       p.currency,
+    isActive:       p.isActive,
+    createdAt:      p.createdAt.toISOString(),
+    updatedAt:      p.updatedAt.toISOString(),
+  });
+
+  // GET /admin/subscription-plans — list all plans
+  app.get(
+    "/subscription-plans",
+    { preHandler: [authenticate, requireRole("admin")] },
+    async (_request, reply) => {
+      const plans = await subPlanRepo.findAll();
+      return reply.send({ plans: plans.map(fmtPlan) });
+    },
+  );
+
+  // POST /admin/subscription-plans — create a plan
+  app.post(
+    "/subscription-plans",
+    { preHandler: [authenticate, requireRole("admin")] },
+    async (request, reply) => {
+      let body: import("zod").infer<typeof createPlanSchema>;
+      try {
+        body = createPlanSchema.parse(request.body);
+      } catch (err) {
+        if (err instanceof z.ZodError)
+          return reply.status(400).send({ message: "Validation failed", errors: err.issues });
+        throw err;
+      }
+      const now = new Date();
+      const plan = await subPlanRepo.create({
+        name:           body.name,
+        durationMonths: body.durationMonths,
+        price:          body.price,
+        currency:       "INR",
+        isActive:       true,
+        createdAt:      now,
+        updatedAt:      now,
+      });
+      return reply.status(201).send(fmtPlan(plan));
+    },
+  );
+
+  // PUT /admin/subscription-plans/:id — update name, price, or isActive
+  app.put(
+    "/subscription-plans/:id",
+    { preHandler: [authenticate, requireRole("admin")] },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      let body: import("zod").infer<typeof updatePlanSchema>;
+      try {
+        body = updatePlanSchema.parse(request.body);
+      } catch (err) {
+        if (err instanceof z.ZodError)
+          return reply.status(400).send({ message: "Validation failed", errors: err.issues });
+        throw err;
+      }
+      const updates: Parameters<typeof subPlanRepo.update>[1] = { updatedAt: new Date() };
+      if (body.name     !== undefined) updates.name     = body.name;
+      if (body.price    !== undefined) updates.price    = body.price;
+      if (body.isActive !== undefined) updates.isActive = body.isActive;
+      const updated = await subPlanRepo.update(id, updates);
+      if (!updated) return reply.status(404).send({ message: "Plan not found" });
+      return reply.send(fmtPlan(updated));
+    },
+  );
+
+  // DELETE /admin/subscription-plans/:id — remove a plan
+  app.delete(
+    "/subscription-plans/:id",
+    { preHandler: [authenticate, requireRole("admin")] },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const deleted = await subPlanRepo.delete(id);
+      if (!deleted) return reply.status(404).send({ message: "Plan not found" });
+      return reply.send({ message: "Plan deleted" });
     },
   );
 };

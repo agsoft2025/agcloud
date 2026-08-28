@@ -26,7 +26,9 @@ import logger from "../../shared/observability/logger.js";
 import config from "../../config/index.js";
 import { scheduleBillingTimers, cancelBillingTimers, getBillingTimerOptions } from "../billing/billing.timers.js";
 import { BillingSettingsRepository } from "../billing/billing-settings.repository.js";
+import { UserFreeCallRepository } from "../billing/user-free-call.repository.js";
 import { calculateAndSaveCharge } from "../billing/billing.service.js";
+import { UserSubscriptionRepository } from "../subscription/user-subscription.repository.js";
 
 // Spec §5.4: 10 req/min per user (not per IP — callers behind a shared IP
 // must not share this budget). `hook: "preHandler"` runs this after the
@@ -47,6 +49,8 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   const userRepo            = new UserRepository();
   const blockRepo           = new BlockRepository();
   const billingSettingsRepo = new BillingSettingsRepository();
+  const freeCallRepo        = new UserFreeCallRepository();
+  const subRepo             = new UserSubscriptionRepository();
 
   // List endpoint for testing in postman
   app.get("/", async () => {
@@ -107,6 +111,28 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
           endedAt: call.endedAt?.toISOString(),
         };
       }),
+    });
+  });
+
+  // GET /calls/eligibility — tells the client whether the user can initiate a call.
+  // Used by the UI to show a subscribe prompt before the user even tries to call.
+  app.get("/eligibility", { preHandler: authenticate }, async (request, reply) => {
+    const userId = request.user!.userId;
+    const [callerSub, freeCallUsed] = await Promise.all([
+      subRepo.findActiveByUserId(userId),
+      freeCallRepo.hasUsedFreeCall(userId),
+    ]);
+    const isSubscribed =
+      !!callerSub &&
+      callerSub.status === "active" &&
+      !!callerSub.endDate &&
+      new Date(callerSub.endDate) > new Date();
+
+    return reply.send({
+      isSubscribed,
+      freeCallUsed,
+      // canInitiate: true unless the user is unsubscribed AND has used the free call.
+      canInitiate: isSubscribed || !freeCallUsed,
     });
   });
 
@@ -182,6 +208,29 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
           busyReceiverIds,
           ...(blockedReceiverIds.length > 0 ? { blockedReceiverIds } : {}),
         });
+      }
+
+      // ── Subscription / free-call eligibility ─────────────────────────────
+      // Only the CALLER is checked here.  Unsubscribed users can still RECEIVE
+      // calls from subscribed callers — the restriction applies only to who
+      // initiates.  This runs server-side to prevent client-side bypass.
+      {
+        const [callerSub, callerFreeCallUsed] = await Promise.all([
+          subRepo.findActiveByUserId(callerId),
+          freeCallRepo.hasUsedFreeCall(callerId),
+        ]);
+        const callerIsSubscribed =
+          !!callerSub &&
+          callerSub.status === "active" &&
+          !!callerSub.endDate &&
+          new Date(callerSub.endDate) > new Date();
+
+        if (!callerIsSubscribed && callerFreeCallUsed) {
+          return reply.status(403).send({
+            message: "Your free call limit is over. Please subscribe to continue.",
+            code:    "FREE_CALL_EXHAUSTED",
+          });
+        }
       }
 
       // Create call record in MongoDB — only the available (non-busy) receivers
@@ -390,31 +439,47 @@ const callRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       void cancelCallTimeout(id);
       callsAccepted.inc();
 
-      // Schedule free-minute billing timers (settings from DB, default 1 min free + 60 s grace)
-      const billingSettings = await billingSettingsRepo.getSettings();
-      const billingOptions = {
-        freeSeconds:        billingSettings.freeMinutes * 60,
-        gracePeriodSeconds: billingSettings.gracePeriodSeconds,
-      };
-      const allParticipantIds = [callRecord.callerId, ...callRecord.receiverIds];
-      scheduleBillingTimers(id, allParticipantIds, async () => {
-        // Cutoff: force-end the call server-side after grace period
-        try {
-          await callRepo.updateCallStatus(id, "ended");
-          await callRepo.markPendingParticipantsAs(id, "missed");
-          const cutoffRecord = await callRepo.getCallById(id);
-          if (cutoffRecord?.startedAt) {
-            void calculateAndSaveCharge(id, {
-              callerId:            callRecord.callerId,
-              calleeIds:           callRecord.receiverIds,
-              callType:            callRecord.callType,
-              startedAt:           cutoffRecord.startedAt,
-              endedAt:             new Date(),
-              freeSecondsOverride: billingOptions.freeSeconds,
-            });
-          }
-        } catch (_err) { /* logged inside calculateAndSaveCharge */ }
-      }, billingOptions);
+      // ── Subscription-aware billing timers ────────────────────────────────
+      // If the CALLER is subscribed, skip the timer entirely — no restriction.
+      // If the CALLER is unsubscribed, apply the free-minute timer and mark
+      // their free call as consumed once the call goes active.
+      const callerSub = await subRepo.findActiveByUserId(callRecord.callerId);
+      const callerIsSubscribed =
+        !!callerSub &&
+        callerSub.status === "active" &&
+        !!callerSub.endDate &&
+        new Date(callerSub.endDate) > new Date();
+
+      if (!callerIsSubscribed) {
+        const billingSettings = await billingSettingsRepo.getSettings();
+        const billingOptions = {
+          freeSeconds:        billingSettings.freeMinutes * 60,
+          gracePeriodSeconds: billingSettings.gracePeriodSeconds,
+        };
+        const allParticipantIds = [callRecord.callerId, ...callRecord.receiverIds];
+        scheduleBillingTimers(id, allParticipantIds, async () => {
+          // Cutoff: force-end the call server-side after grace period
+          try {
+            await callRepo.updateCallStatus(id, "ended");
+            await callRepo.markPendingParticipantsAs(id, "missed");
+            const cutoffRecord = await callRepo.getCallById(id);
+            if (cutoffRecord?.startedAt) {
+              void calculateAndSaveCharge(id, {
+                callerId:            callRecord.callerId,
+                calleeIds:           callRecord.receiverIds,
+                callType:            callRecord.callType,
+                startedAt:           cutoffRecord.startedAt,
+                endedAt:             new Date(),
+                freeSecondsOverride: billingOptions.freeSeconds,
+              });
+            }
+          } catch (_err) { /* logged inside calculateAndSaveCharge */ }
+        }, billingOptions);
+
+        // Mark the caller's free call as consumed.  This happens when the call
+        // first becomes active — preventing another free-minute on a future call.
+        void freeCallRepo.markFreeCallUsed(callRecord.callerId, id);
+      }
     }
 
     // Mark this participant as joined (works for first-time accepts, re-invites,
