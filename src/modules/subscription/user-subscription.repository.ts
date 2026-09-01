@@ -64,6 +64,35 @@ export class UserSubscriptionRepository {
     );
   }
 
+  /**
+   * Return the most-recently-created subscription for every user in one
+   * aggregation round trip. Used by the admin enriched-user endpoint.
+   *
+   * Returns a map keyed by userId.
+   */
+  async findLatestPerUser(): Promise<Map<string, UserSubscriptionDocument>> {
+    const col = await this.col();
+    const pipeline = [
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: "$userId",
+          doc: { $first: "$$ROOT" },
+        },
+      },
+    ];
+
+    const results = await col
+      .aggregate<{ _id: string; doc: UserSubscriptionDocument }>(pipeline)
+      .toArray();
+
+    const map = new Map<string, UserSubscriptionDocument>();
+    for (const r of results) {
+      map.set(r._id, r.doc);
+    }
+    return map;
+  }
+
   /** Mark subscriptions whose endDate has passed as expired. */
   async expireOverdue(): Promise<number> {
     const col = await this.col();

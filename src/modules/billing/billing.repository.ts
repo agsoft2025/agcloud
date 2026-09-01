@@ -30,4 +30,48 @@ export class BillingRepository {
     ]);
     return { charges, total };
   }
+
+  /**
+   * Aggregate total, audio, and video call seconds for every caller
+   * in a single round trip. Used by the admin enriched-user endpoint.
+   *
+   * Returns a map keyed by userId (callerId).
+   */
+  async findUsageGroupedByCaller(): Promise<
+    Map<string, { totalSeconds: number; audioSeconds: number; videoSeconds: number }>
+  > {
+    const col = await this.col();
+    const pipeline = [
+      {
+        $group: {
+          _id: "$callerId",
+          totalSeconds: { $sum: "$durationSeconds" },
+          audioSeconds: {
+            $sum: {
+              $cond: [{ $eq: ["$callType", "audio"] }, "$durationSeconds", 0],
+            },
+          },
+          videoSeconds: {
+            $sum: {
+              $cond: [{ $eq: ["$callType", "video"] }, "$durationSeconds", 0],
+            },
+          },
+        },
+      },
+    ];
+
+    const results = await col
+      .aggregate<{ _id: string; totalSeconds: number; audioSeconds: number; videoSeconds: number }>(pipeline)
+      .toArray();
+
+    const map = new Map<string, { totalSeconds: number; audioSeconds: number; videoSeconds: number }>();
+    for (const r of results) {
+      map.set(r._id, {
+        totalSeconds: r.totalSeconds,
+        audioSeconds: r.audioSeconds,
+        videoSeconds: r.videoSeconds,
+      });
+    }
+    return map;
+  }
 }

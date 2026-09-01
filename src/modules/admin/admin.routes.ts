@@ -5,10 +5,14 @@ import { PricingRepository } from "../pricing/pricing.repository.js";
 import { BillingRepository } from "../billing/billing.repository.js";
 import { BillingSettingsRepository } from "../billing/billing-settings.repository.js";
 import { SubscriptionPlanRepository } from "../subscription/subscription-plan.repository.js";
+import { UserSubscriptionRepository } from "../subscription/user-subscription.repository.js";
+import { UserFreeCallRepository } from "../billing/user-free-call.repository.js";
+import { UserRepository } from "../user/user.repository.js";
 import { createRateSchema, updateRateSchema } from "../pricing/pricing.schemas.js";
 import type { PricingRateDocument } from "../pricing/pricing.schemas.js";
 import { createPlanSchema, updatePlanSchema } from "../subscription/subscription.schemas.js";
 import type { SubscriptionPlanDocument } from "../subscription/subscription.schemas.js";
+import { getActiveRates } from "../pricing/pricing.service.js";
 import { authenticate, requireRole } from "../../shared/middleware/auth.middleware.js";
 import { writeAuditLog } from "../../shared/security/audit-log.js";
 
@@ -23,6 +27,121 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   const billingRepo         = new BillingRepository();
   const billingSettingsRepo = new BillingSettingsRepository();
   const subPlanRepo         = new SubscriptionPlanRepository();
+  const userSubRepo         = new UserSubscriptionRepository();
+  const freeCallRepo        = new UserFreeCallRepository();
+  const userRepo            = new UserRepository();
+
+  // ── Enriched user list ────────────────────────────────────────────────────
+  //
+  // GET /admin/users/enriched
+  // Returns all users with their latest subscription and call-usage stats in
+  // one response. Uses three batch queries (no N+1): one for call_charges, one
+  // for user_subscriptions, one for user_free_call_usage.
+
+  app.get(
+    "/users/enriched",
+    { preHandler: [authenticate, requireRole("admin")] },
+    async (_request, reply) => {
+      // ── Batch-fetch all data in one parallel round trip ───────────────────
+      const now = new Date();
+      const [users, durationMap, subMap, rates] = await Promise.all([
+        userRepo.findAll(),
+        callRepo.findDurationGroupedByCaller(),   // from `calls` collection — accurate for all users
+        userSubRepo.findLatestPerUser(),
+        getActiveRates(now),                       // current audio + video ₹/min rates
+      ]);
+
+      // Fetch free-call usage for all user IDs in one query.
+      const userIds = users.map((u) => u._id.toString());
+      const { connectMongo } = await import("../../shared/db/mongo.client.js");
+      const db = await connectMongo();
+      const freeCallDocs = await db
+        .collection<{ userId: string; used: boolean }>("user_free_call_usage")
+        .find({ userId: { $in: userIds } })
+        .toArray();
+      const freeCallMap = new Map<string, boolean>(
+        freeCallDocs.map((d) => [d.userId, d.used]),
+      );
+
+      // ── Current pricing rates (₹/min) ─────────────────────────────────────
+      const audioRate = rates.audio?.ratePerMinute ?? 0;
+      const videoRate = rates.video?.ratePerMinute ?? 0;
+
+      const enriched = users.map((u) => {
+        const uid      = u._id.toString();
+        const dur      = durationMap.get(uid) ?? { audioSeconds: 0, videoSeconds: 0 };
+        const sub      = subMap.get(uid) ?? null;
+        const freeUsed = freeCallMap.get(uid) ?? false;
+
+        // Actual minutes (raw, not capped to billable seconds)
+        const audioMinutes = dur.audioSeconds / 60;
+        const videoMinutes = dur.videoSeconds / 60;
+
+        // ₹ spent at current rates
+        const amountUsed =
+          Math.round((audioMinutes * audioRate + videoMinutes * videoRate) * 100) / 100;
+
+        // Remaining balance only makes sense when the user has paid for a subscription
+        const subscriptionAmount = sub?.amount ?? null;
+        const remainingBalance =
+          subscriptionAmount !== null
+            ? Math.max(0, Math.round((subscriptionAmount - amountUsed) * 100) / 100)
+            : null;
+
+        // Remaining call time given the balance and current rates
+        const remainingAudioMinutes =
+          remainingBalance !== null && audioRate > 0
+            ? Math.max(0, Math.floor(remainingBalance / audioRate))
+            : null;
+        const remainingVideoMinutes =
+          remainingBalance !== null && videoRate > 0
+            ? Math.max(0, Math.floor(remainingBalance / videoRate))
+            : null;
+
+        const isActiveSubscriber =
+          sub !== null &&
+          sub.status === "active" &&
+          sub.endDate !== null &&
+          sub.endDate > now;
+
+        return {
+          id:          uid,
+          email:       u.email,
+          displayName: u.displayName,
+          avatarUrl:   u.avatarUrl ?? null,
+          role:        u.role,
+          status:      u.status,
+          createdAt:   u.createdAt.toISOString(),
+          subscription: sub
+            ? {
+                planName:       sub.planName,
+                durationMonths: sub.durationMonths,
+                status:         isActiveSubscriber ? "active" : sub.status,
+                startDate:      sub.startDate?.toISOString() ?? null,
+                endDate:        sub.endDate?.toISOString()   ?? null,
+                amount:         sub.amount,
+                currency:       sub.currency,
+              }
+            : null,
+          usage: {
+            audioSeconds:     dur.audioSeconds,
+            videoSeconds:     dur.videoSeconds,
+            audioMinutes:     Math.round(audioMinutes * 100) / 100,
+            videoMinutes:     Math.round(videoMinutes * 100) / 100,
+            audioRate,        // ₹/min
+            videoRate,        // ₹/min
+            amountUsed,       // ₹ spent at current rates
+            remainingBalance, // ₹ left (null if no subscription)
+            remainingAudioMinutes,  // minutes of audio left (null if no sub)
+            remainingVideoMinutes,  // minutes of video left (null if no sub)
+          },
+          freeCallUsed: freeUsed,
+        };
+      });
+
+      return reply.send({ users: enriched, total: enriched.length });
+    },
+  );
 
   // ── Active calls ─────────────────────────────────────────────────────────
 
