@@ -1,10 +1,62 @@
 # agcloud Backend — Development Status Report (Update)
 
-**Date:** July 29, 2026
-**Branch reviewed:** `dev` @ `8abeed1` ("(fix) test cases added", Vipin — clean working tree, nothing uncommitted)
+**Date:** September 4, 2026
+**Branch reviewed:** `dev` @ `2b1361c` ("StatusDoc Update4", Ajay — clean working tree, `dev` matches `origin/dev` exactly)
 **Reference spec:** `documents/Backend-Specification.md`
 **Prepared by:** Claude Code
-**Previous report:** July 28, 2026 (below)
+**Previous report:** July 29, 2026 (below)
+
+---
+
+## What changed since July 29
+
+**No code has landed.** `dev` has been idle for five weeks — `2b1361c` (the
+July 29 doc/lockfile commit) is still the tip, both locally and on
+`origin/dev`. Nothing below is a re-read of the prior report's claims; each
+was independently re-verified against the actual working tree this session:
+
+- `npm ci`: clean install, no lockfile errors.
+- `npx tsc --noEmit`: clean, no errors.
+- `npx vitest run`: **548 passed / 548, 50 test files** — identical to July
+  29. Every module score and "✅ Fixed/New" claim in the July 29 sections
+  below was spot-checked against current source (`admin.routes.ts`,
+  `helm/agcloud-backend/templates/*`, `notification.queue.ts`, etc.) and
+  still matches what's on disk.
+
+### The one thing that did change: the dependency vulnerability surface
+
+Same lockfile, same resolved versions as July 29 — but `npm audit` now
+reports a **different** set of issues, because new CVEs were disclosed
+against those same pinned versions during the five idle weeks, not because
+anything in this repo changed:
+
+- **Production dependencies: 5 high-severity findings** (`npm audit
+  --omit=dev`) — `fastify` itself (not just the previously-flagged
+  `find-my-way` transitive) now has 4 open advisories in the `<=5.12.0`
+  range (DoS via unbounded `sendWebStream` allocation, a Content-Type
+  header validation bypass, `X-Forwarded-Proto`/`Host` spoofing, and a
+  schema-coercion bypass) — all still only fixable via the same planned
+  Fastify 5 migration already tracked below; plus newly-flagged
+  `socket.io-parser` (zero-attachment memory exhaustion) and `fast-uri`
+  (host-confusion/SSRF, via `ajv`'s transitive copy), both fixable
+  non-breaking via `npm audit fix`.
+- **Dev-only additions:** `brace-expansion`, `esbuild`, `js-yaml`,
+  `nanoid`, `postcss` — all transitive of `eslint`/`vitest`/OTel tooling,
+  none reachable at runtime, all fixable non-breaking via `npm audit fix`.
+- **`ws` is no longer flagged** — the advisory referenced in the July 20/28
+  reports appears to have been superseded/resolved in the advisory
+  database for the version already pinned here.
+- **Net count: 9 vulnerabilities (1 low, 1 moderate, 7 high)**, vs. July
+  29's 17 (1 low, 16 high) — fewer in total, but the production-reachable
+  count (5, all high) is worth board attention on its own, since `fastify`
+  itself is now directly implicated and not just a transitive dependency.
+  Recommend running `npm audit fix` (non-breaking — resolves 6 of the 9)
+  as routine maintenance regardless of the Fastify 5 decision, since it
+  touches nothing tracked in the migration plan.
+
+**Net effect on scores below:** No change — this is a dependency-advisory
+delta, not a functionality regression. All module scores from July 29 stand
+confirmed as of this session.
 
 ---
 
@@ -234,11 +286,11 @@ chart templates (still empty stubs, no spec/requirements given for them).
 
 ## What's still open
 
-*(Updated July 29 — Helm charts and the lockfile fix from the July 28 list are now done; see the July 29 section at the top of this report.)*
+*(Updated September 4 — vulnerability count and composition refreshed; everything else unchanged since July 29, see the September 4 section at the top of this report.)*
 
 - **2FA/TOTP** — explicitly out of spec scope per the July 11 report.
 - **OpenTelemetry export target** — wired and functional, but does nothing until `OTEL_EXPORTER_OTLP_ENDPOINT` is set to a real collector (Jaeger/Tempo/etc.) in each environment's config. That's a deployment step, not a code gap.
-- **17 npm audit vulnerabilities (16 high), unchanged since July 28** — `ws` (fixable non-breaking via `npm audit fix`) and `find-my-way`/Fastify 4.x (needs a planned Fastify 5 migration, tied to the `registerFastify4OptionalPlugin` shim in `app.ts`).
+- **9 npm audit vulnerabilities (1 low, 1 moderate, 7 high)** as of September 4 (was 17 on July 29 — same lockfile, newly-disclosed CVEs against the same pinned versions; see the September 4 section at the top). 6 of the 9 (including newly-flagged `fastify` itself, `socket.io-parser`, `fast-uri`) are fixable non-breaking via `npm audit fix` and should just be run; the remaining `find-my-way`/Fastify-4.x chain still needs the planned Fastify 5 migration (tied to the `registerFastify4OptionalPlugin` shim in `app.ts`).
 - **Helm charts are un-deployed templates** — real content now (deployment/service/ingress/HPA/PDB/secret), but not yet proven against a live cluster; worth a `helm template`/`helm lint` + a real `helm upgrade --install` against a staging cluster before calling this fully closed.
 
 ---
