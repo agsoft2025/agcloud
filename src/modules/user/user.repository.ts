@@ -22,6 +22,12 @@ export class UserRepository {
     return db.collection<UserDocument>("users");
   }
 
+  /** Return every user document — no filters. Used by admin endpoints. */
+  async findAll(): Promise<UserDocument[]> {
+    const collection = await this.getCollection();
+    return collection.find({}).sort({ createdAt: -1 }).toArray();
+  }
+
   async listContacts(options: ListContactsOptions): Promise<ListContactsResult> {
     const collection = await this.getCollection();
     const { page, limit, search, excludeUserId } = options;

@@ -249,6 +249,67 @@ export class CallRepository {
       .toArray();
   }
 
+  /**
+   * Aggregate actual call durations by caller from the `calls` collection.
+   *
+   * Uses ended calls that have both `startedAt` and `endedAt` set — this is
+   * the only reliable source for subscribed-user durations, because billing
+   * timers (and therefore `call_charges` records) are skipped for them.
+   *
+   * Returns a map keyed by callerId with split audio/video seconds.
+   */
+  async findDurationGroupedByCaller(): Promise<
+    Map<string, { audioSeconds: number; videoSeconds: number }>
+  > {
+    const collection = await this.getCollection();
+
+    const pipeline = [
+      {
+        $match: {
+          status:    "ended",
+          startedAt: { $exists: true, $ne: null },
+          endedAt:   { $exists: true, $ne: null },
+        },
+      },
+      {
+        $addFields: {
+          // Mongo dates are stored as BSON Date; subtract gives ms.
+          durationSec: {
+            $max: [
+              0,
+              { $divide: [{ $subtract: ["$endedAt", "$startedAt"] }, 1000] },
+            ],
+          },
+        },
+      },
+      {
+        $group: {
+          _id: "$callerId",
+          audioSeconds: {
+            $sum: {
+              $cond: [{ $eq: ["$callType", "audio"] }, "$durationSec", 0],
+            },
+          },
+          videoSeconds: {
+            $sum: {
+              $cond: [{ $eq: ["$callType", "video"] }, "$durationSec", 0],
+            },
+          },
+        },
+      },
+    ];
+
+    const results = await collection
+      .aggregate<{ _id: string; audioSeconds: number; videoSeconds: number }>(pipeline)
+      .toArray();
+
+    const map = new Map<string, { audioSeconds: number; videoSeconds: number }>();
+    for (const r of results) {
+      map.set(r._id, { audioSeconds: r.audioSeconds, videoSeconds: r.videoSeconds });
+    }
+    return map;
+  }
+
   /** Admin view: every call currently ringing or in progress, newest first, paginated. */
   async getActiveCalls(
     page: number,

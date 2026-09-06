@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { UserRepository } from "./user.repository.js";
 import { UserDocument } from "./user.schemas.js";
-import { authenticate } from "../../shared/middleware/auth.middleware.js";
+import { authenticate, requireRole } from "../../shared/middleware/auth.middleware.js";
 import { activityMiddleware } from "../../shared/middleware/activity.middleware.js";
 import { presenceRepo, computeStatus } from "../presence/presence.service.js";
 import { ContactRepository } from "../contact/contact.repository.js";
@@ -43,6 +43,17 @@ const updateProfileSchema = z.object({
     .max(50, "Display name must be at most 50 characters")
     .optional(),
   avatarUrl: z.string().optional(),
+});
+
+// Admin-only: fields an admin may change on any user account
+const adminUpdateUserSchema = z.object({
+  displayName: z
+    .string()
+    .min(2, "Display name must be at least 2 characters")
+    .max(50, "Display name must be at most 50 characters")
+    .optional(),
+  role: z.enum(["user", "admin", "moderator", "support"]).optional(),
+  status: z.enum(["active", "suspended", "deleted"]).optional(),
 });
 
 const userIdParamSchema = z.object({ id: z.string().min(1) });
@@ -318,6 +329,102 @@ const userRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         return reply.status(404).send({ message: "Block not found" });
       }
       return reply.send({ message: "User unblocked successfully" });
+    }
+  );
+
+  // PUT /users/:id — admin: update any user's profile fields (role, status, displayName)
+  app.put(
+    "/:id",
+    { preHandler: [authenticate, requireRole("admin"), activityMiddleware] },
+    async (request, reply) => {
+      const { id } = userIdParamSchema.parse(request.params);
+
+      // Prevent an admin from accidentally demoting / suspending themselves
+      if (id === request.user!.userId) {
+        return reply.status(400).send({ message: "Admins cannot modify their own account via this endpoint. Use PUT /users/me." });
+      }
+
+      let body: z.infer<typeof adminUpdateUserSchema>;
+      try {
+        body = adminUpdateUserSchema.parse(request.body);
+      } catch (err) {
+        if (err instanceof z.ZodError) {
+          return reply.status(400).send({ message: "Validation failed", errors: err.issues });
+        }
+        throw err;
+      }
+
+      if (!body.displayName && !body.role && !body.status) {
+        return reply.status(400).send({ message: "No updatable fields provided." });
+      }
+
+      let objectId;
+      try {
+        objectId = new ObjectId(id);
+      } catch {
+        return reply.status(400).send({ message: "Invalid user ID format." });
+      }
+
+      const updates: Record<string, unknown> = { updatedAt: new Date() };
+      if (body.displayName !== undefined) updates.displayName = body.displayName;
+      if (body.role       !== undefined) updates.role        = body.role;
+      if (body.status     !== undefined) updates.status      = body.status;
+
+      try {
+        const result = await usersCollection.findOneAndUpdate(
+          { _id: objectId },
+          { $set: updates },
+          {
+            returnDocument: "after",
+            projection: { passwordHash: 0, resetPasswordToken: 0, resetPasswordExpires: 0 },
+          }
+        );
+
+        if (!result) return reply.status(404).send({ message: "User not found" });
+
+        return reply.send({
+          id:          result._id.toString(),
+          email:       result.email,
+          role:        result.role,
+          status:      result.status,
+          displayName: result.displayName,
+          avatarUrl:   result.avatarUrl ?? null,
+        });
+      } catch (err) {
+        logger.error({ err }, "PUT /users/:id failed");
+        return reply.status(500).send({ message: "Internal server error" });
+      }
+    }
+  );
+
+  // DELETE /users/:id — admin: permanently remove a user account
+  app.delete(
+    "/:id",
+    { preHandler: [authenticate, requireRole("admin"), activityMiddleware] },
+    async (request, reply) => {
+      const { id } = userIdParamSchema.parse(request.params);
+
+      if (id === request.user!.userId) {
+        return reply.status(400).send({ message: "Admins cannot delete their own account." });
+      }
+
+      let objectId;
+      try {
+        objectId = new ObjectId(id);
+      } catch {
+        return reply.status(400).send({ message: "Invalid user ID format." });
+      }
+
+      try {
+        const result = await usersCollection.deleteOne({ _id: objectId });
+        if (result.deletedCount === 0) {
+          return reply.status(404).send({ message: "User not found" });
+        }
+        return reply.status(200).send({ message: "User deleted successfully" });
+      } catch (err) {
+        logger.error({ err }, "DELETE /users/:id failed");
+        return reply.status(500).send({ message: "Internal server error" });
+      }
     }
   );
 

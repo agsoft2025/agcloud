@@ -40,6 +40,12 @@ const envSchema = z.object({
   SMTP_SECURE: z.string().optional(),
   SMTP_FROM: z.string().default("no-reply@agcloud.example.com"),
   LOG_LEVEL: z.string().default("info"),
+  // Razorpay — swap test keys for live keys to go to production.
+  // Test key format:  rzp_test_XXXXXXXXXX
+  // Live key format:  rzp_live_XXXXXXXXXX
+  // .trim() guards against accidental leading/trailing whitespace in .env.
+  RAZORPAY_KEY_ID: z.string().default("").transform((s) => s.trim()),
+  RAZORPAY_KEY_SECRET: z.string().default("").transform((s) => s.trim()),
 });
 
 const envVars = envSchema.parse(process.env);
@@ -66,6 +72,8 @@ const config = {
   smtpSecure: envVars.SMTP_SECURE === "true",
   smtpFrom: envVars.SMTP_FROM,
   logLevel: envVars.LOG_LEVEL,
+  razorpayKeyId: envVars.RAZORPAY_KEY_ID,
+  razorpayKeySecret: envVars.RAZORPAY_KEY_SECRET,
 };
 
 export default config;
