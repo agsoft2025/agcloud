@@ -99,6 +99,18 @@ export class UserRepository {
     }
   }
 
+  /** Fetch multiple users by their string IDs in one query. Invalid IDs are silently skipped. */
+  async findManyByIds(ids: string[]): Promise<UserDocument[]> {
+    if (ids.length === 0) return [];
+    const collection = await this.getCollection();
+    const objectIds: ObjectId[] = [];
+    for (const id of ids) {
+      try { objectIds.push(new ObjectId(id)); } catch { /* skip invalid */ }
+    }
+    if (objectIds.length === 0) return [];
+    return collection.find({ _id: { $in: objectIds } }).toArray();
+  }
+
   /**
    * Persists presence state to the database.
    * Called by the presence worker (every 5 min) and immediately on OFFLINE transition.

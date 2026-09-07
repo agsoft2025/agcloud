@@ -1,5 +1,6 @@
 import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { z } from "zod";
+import type { Db } from "mongodb";
 import { CallRepository } from "../call/call.repository.js";
 import { PricingRepository } from "../pricing/pricing.repository.js";
 import { BillingRepository } from "../billing/billing.repository.js";
@@ -140,6 +141,233 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       });
 
       return reply.send({ users: enriched, total: enriched.length });
+    },
+  );
+
+  // ── User report helpers ──────────────────────────────────────────────────
+  //
+  // Shared call-enrichment logic used by both the paginated report endpoint
+  // and the full export endpoint. Fetches peer user names + charge amounts in
+  // two batch queries (no N+1).
+
+  async function enrichCallDocs(
+    rawCalls: Record<string, unknown>[],
+    userId: string,
+    userEmail: string,
+    userDisplayName: string,
+    db: Db,
+  ) {
+    if (rawCalls.length === 0) return [];
+
+    // Collect unique peer IDs
+    const peerIdSet = new Set<string>();
+    for (const call of rawCalls) {
+      const cid = call.callerId as string | undefined;
+      if (cid && cid !== userId) peerIdSet.add(cid);
+      for (const rid of (call.receiverIds ?? []) as string[]) {
+        if (rid !== userId) peerIdSet.add(rid);
+      }
+    }
+
+    // Batch-fetch peer names
+    const peerDocs = await userRepo.findManyByIds([...peerIdSet]);
+    const peerMap  = new Map<string, { email: string; displayName: string }>();
+    peerMap.set(userId, { email: userEmail, displayName: userDisplayName });
+    for (const p of peerDocs) {
+      peerMap.set(p._id.toString(), { email: p.email, displayName: p.displayName ?? "" });
+    }
+
+    // Batch-fetch charge records
+    const callIds   = rawCalls.map((c: Record<string, unknown>) => (c._id as { toString(): string }).toString());
+    const chargeDocs = await db
+      .collection("call_charges")
+      .find({ callId: { $in: callIds } })
+      .toArray();
+    const chargeMap = new Map<string, number>();
+    for (const ch of chargeDocs) {
+      chargeMap.set(ch.callId as string, ch.amountOwed as number);
+    }
+
+    return rawCalls.map((call: Record<string, unknown>) => {
+      const cid = (call._id as { toString(): string }).toString();
+      const dur =
+        call.startedAt && call.endedAt
+          ? Math.max(
+              0,
+              Math.round(
+                ((call.endedAt as Date).getTime() - (call.startedAt as Date).getTime()) / 1000,
+              ),
+            )
+          : 0;
+      const caller = peerMap.get(call.callerId as string) ?? {
+        email: (call.callerId as string) ?? "",
+        displayName: "",
+      };
+      const receivers = ((call.receiverIds ?? []) as string[]).map((rid) => {
+        const u = peerMap.get(rid) ?? { email: rid, displayName: "" };
+        return { userId: rid, email: u.email, displayName: u.displayName };
+      });
+      return {
+        id:              cid,
+        callType:        call.callType  as string,
+        callMode:        call.callMode  as string,
+        status:          call.status    as string,
+        durationSeconds: dur,
+        createdAt:       (call.createdAt as Date | null)?.toISOString() ?? null,
+        startedAt:       (call.startedAt as Date | null)?.toISOString() ?? null,
+        endedAt:         (call.endedAt   as Date | null)?.toISOString() ?? null,
+        callerId:        call.callerId as string,
+        callerEmail:     caller.email,
+        callerName:      caller.displayName,
+        receivers,
+        amountCharged:   chargeMap.get(cid) ?? null,  // null = subscribed/not billed
+      };
+    });
+  }
+
+  // ── User report (paginated) ───────────────────────────────────────────────
+  //
+  // GET /admin/reports/user/:userId?page=1&limit=20&callType=audio&status=ended
+  // Returns paginated call history + all subscriptions for a user.
+  // Subscriptions are not paginated (users rarely have many).
+
+  app.get(
+    "/reports/user/:userId",
+    { preHandler: [authenticate, requireRole("admin")] },
+    async (request, reply) => {
+      const { userId } = request.params as { userId: string };
+      const q = request.query as {
+        page?: string; limit?: string; callType?: string; status?: string;
+      };
+
+      const page  = Math.max(1, parseInt(q.page  ?? "1",  10) || 1);
+      const limit = Math.min(100, Math.max(1, parseInt(q.limit ?? "20", 10) || 20));
+      const skip  = (page - 1) * limit;
+
+      const user = await userRepo.getUserById(userId);
+      if (!user) return reply.status(404).send({ message: "User not found" });
+
+      const { connectMongo } = await import("../../shared/db/mongo.client.js");
+      const db = await connectMongo();
+
+      // Build call filter — always scoped to this user
+      const callFilter: Record<string, unknown> = {
+        $or: [{ callerId: userId }, { receiverIds: userId }],
+      };
+      if (q.callType) callFilter.callType = q.callType;
+      if (q.status)   callFilter.status   = q.status;
+
+      const callsCol = db.collection("calls");
+
+      const [subscriptions, totalCalls, rawCalls] = await Promise.all([
+        userSubRepo.findAllByUserId(userId),
+        callsCol.countDocuments(callFilter),
+        callsCol
+          .find(callFilter)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .toArray(),
+      ]);
+
+      const calls = await enrichCallDocs(
+        rawCalls as unknown as Record<string, unknown>[],
+        userId,
+        user.email,
+        user.displayName ?? "",
+        db,
+      );
+
+      return reply.send({
+        user: {
+          id:          userId,
+          email:       user.email,
+          displayName: user.displayName ?? "",
+          avatarUrl:   user.avatarUrl ?? null,
+          role:        user.role,
+          status:      user.status,
+          createdAt:   user.createdAt.toISOString(),
+        },
+        subscriptions: subscriptions.map((s) => ({
+          id:             s._id.toString(),
+          planName:       s.planName,
+          durationMonths: s.durationMonths,
+          amount:         s.amount,
+          currency:       s.currency,
+          status:         s.status,
+          startDate:      s.startDate?.toISOString() ?? null,
+          endDate:        s.endDate?.toISOString()   ?? null,
+          createdAt:      (s as unknown as { createdAt?: Date }).createdAt?.toISOString() ?? null,
+        })),
+        calls,
+        totalCalls,
+        page,
+        limit,
+        totalPages: Math.max(1, Math.ceil(totalCalls / limit)),
+      });
+    },
+  );
+
+  // ── User report export (all records, for CSV download) ────────────────────
+  //
+  // GET /admin/reports/user/:userId/export
+  // Returns every call + subscription for the user (up to 5 000 calls).
+  // Used exclusively by the frontend Download History button — do NOT paginate.
+
+  app.get(
+    "/reports/user/:userId/export",
+    { preHandler: [authenticate, requireRole("admin")] },
+    async (request, reply) => {
+      const { userId } = request.params as { userId: string };
+
+      const user = await userRepo.getUserById(userId);
+      if (!user) return reply.status(404).send({ message: "User not found" });
+
+      const { connectMongo } = await import("../../shared/db/mongo.client.js");
+      const db = await connectMongo();
+
+      const [subscriptions, rawCalls] = await Promise.all([
+        userSubRepo.findAllByUserId(userId),
+        db
+          .collection("calls")
+          .find({ $or: [{ callerId: userId }, { receiverIds: userId }] })
+          .sort({ createdAt: -1 })
+          .limit(5000)
+          .toArray(),
+      ]);
+
+      const calls = await enrichCallDocs(
+        rawCalls as unknown as Record<string, unknown>[],
+        userId,
+        user.email,
+        user.displayName ?? "",
+        db,
+      );
+
+      return reply.send({
+        user: {
+          id:          userId,
+          email:       user.email,
+          displayName: user.displayName ?? "",
+          avatarUrl:   user.avatarUrl ?? null,
+          role:        user.role,
+          status:      user.status,
+          createdAt:   user.createdAt.toISOString(),
+        },
+        subscriptions: subscriptions.map((s) => ({
+          id:             s._id.toString(),
+          planName:       s.planName,
+          durationMonths: s.durationMonths,
+          amount:         s.amount,
+          currency:       s.currency,
+          status:         s.status,
+          startDate:      s.startDate?.toISOString() ?? null,
+          endDate:        s.endDate?.toISOString()   ?? null,
+          createdAt:      (s as unknown as { createdAt?: Date }).createdAt?.toISOString() ?? null,
+        })),
+        calls,
+        totalCalls: calls.length,
+      });
     },
   );
 
