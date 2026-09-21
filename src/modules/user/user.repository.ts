@@ -99,6 +99,42 @@ export class UserRepository {
     }
   }
 
+  /**
+   * Return a single page of users with optional search + field filters.
+   * `idFilter` is passed directly as the `_id` predicate (e.g. `{ $in: [...] }`
+   * or `{ $nin: [...] }`) and is used by the admin sub-status pre-filter.
+   */
+  async findPaged(options: {
+    page:       number;
+    limit:      number;
+    search?:    string;
+    role?:      string;
+    status?:    string;
+    idFilter?:  { $in: ObjectId[] } | { $nin: ObjectId[] };
+  }): Promise<{ users: UserDocument[]; total: number }> {
+    const { page, limit, search, role, status, idFilter } = options;
+    const collection = await this.getCollection();
+
+    const filter: Record<string, unknown> = {};
+    if (search?.trim()) {
+      const esc = search.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      filter.$or = [
+        { displayName: new RegExp(esc, "i") },
+        { email:       new RegExp(esc, "i") },
+      ];
+    }
+    if (role)     filter.role   = role;
+    if (status)   filter.status = status;
+    if (idFilter) filter._id    = idFilter;
+
+    const skip = (page - 1) * limit;
+    const [users, total] = await Promise.all([
+      collection.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray(),
+      collection.countDocuments(filter),
+    ]);
+    return { users, total };
+  }
+
   /** Fetch multiple users by their string IDs in one query. Invalid IDs are silently skipped. */
   async findManyByIds(ids: string[]): Promise<UserDocument[]> {
     if (ids.length === 0) return [];

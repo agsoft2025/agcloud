@@ -93,6 +93,33 @@ export class UserSubscriptionRepository {
     return map;
   }
 
+  /**
+   * Same as `findLatestPerUser` but scoped to the provided user IDs.
+   * Used by the paginated admin user-list endpoint to avoid scanning every
+   * subscription document when only a single page of users is needed.
+   */
+  async findLatestForUsers(
+    userIds: string[],
+  ): Promise<Map<string, UserSubscriptionDocument>> {
+    if (userIds.length === 0) return new Map();
+    const col = await this.col();
+    const pipeline = [
+      { $match: { userId: { $in: userIds } } },
+      { $sort:  { createdAt: -1 } },
+      { $group: { _id: "$userId", doc: { $first: "$$ROOT" } } },
+    ];
+
+    const results = await col
+      .aggregate<{ _id: string; doc: UserSubscriptionDocument }>(pipeline)
+      .toArray();
+
+    const map = new Map<string, UserSubscriptionDocument>();
+    for (const r of results) {
+      map.set(r._id, r.doc);
+    }
+    return map;
+  }
+
   /** Mark subscriptions whose endDate has passed as expired. */
   async expireOverdue(): Promise<number> {
     const col = await this.col();

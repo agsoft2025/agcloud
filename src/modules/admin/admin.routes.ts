@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { z } from "zod";
-import type { Db } from "mongodb";
+import { ObjectId, type Db } from "mongodb";
 import { CallRepository } from "../call/call.repository.js";
 import { PricingRepository } from "../pricing/pricing.repository.js";
 import { BillingRepository } from "../billing/billing.repository.js";
@@ -16,6 +16,7 @@ import type { SubscriptionPlanDocument } from "../subscription/subscription.sche
 import { getActiveRates } from "../pricing/pricing.service.js";
 import { authenticate, requireRole } from "../../shared/middleware/auth.middleware.js";
 import { writeAuditLog } from "../../shared/security/audit-log.js";
+import { writeAdminAuditLog, queryAdminAuditLog } from "../../shared/admin-audit-log.js";
 
 const billingSettingsSchema = z.object({
   freeMinutes:        z.number().int().min(1).max(60),
@@ -32,34 +33,121 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   const freeCallRepo        = new UserFreeCallRepository();
   const userRepo            = new UserRepository();
 
-  // ── Enriched user list ────────────────────────────────────────────────────
+  // ── Enriched user list (paginated) ───────────────────────────────────────
   //
-  // GET /admin/users/enriched
-  // Returns all users with their latest subscription and call-usage stats in
-  // one response. Uses three batch queries (no N+1): one for call_charges, one
-  // for user_subscriptions, one for user_free_call_usage.
+  // GET /admin/users/enriched?page=1&limit=20&search=&role=&status=&subStatus=
+  //
+  // Pagination is fully server-side. Billing aggregation runs only for the
+  // users on the requested page — not for the entire user base.
+  //
+  // subStatus filter ("active" | "expired" | "none") is resolved by a single
+  // aggregation on user_subscriptions before the user query so the resulting
+  // page + total count are always accurate.
 
   app.get(
     "/users/enriched",
     { preHandler: [authenticate, requireRole("admin")] },
-    async (_request, reply) => {
-      // ── Batch-fetch all data in one parallel round trip ───────────────────
+    async (request, reply) => {
+      const q = request.query as {
+        page?:      string;
+        limit?:     string;
+        search?:    string;
+        role?:      string;
+        status?:    string;
+        subStatus?: string;
+      };
+
+      const page      = Math.max(1, parseInt(q.page  ?? "1",  10) || 1);
+      const limit     = Math.min(100, Math.max(1, parseInt(q.limit ?? "20", 10) || 20));
+      const search    = q.search    || undefined;
+      const role      = q.role      || undefined;
+      const status    = q.status    || undefined;
+      const subStatus = q.subStatus || undefined;
+
       const now = new Date();
-      const [users, durationMap, subMap, rates] = await Promise.all([
-        userRepo.findAll(),
-        callRepo.findDurationGroupedByCaller(),   // from `calls` collection — accurate for all users
-        userSubRepo.findLatestPerUser(),
-        getActiveRates(now),                       // current audio + video ₹/min rates
+
+      // ── Sub-status pre-filter ──────────────────────────────────────────────
+      // Resolve which user IDs match the sub-status in a single aggregation
+      // so the subsequent user query (and its count) are already correct.
+      let idFilter: { $in: ObjectId[] } | { $nin: ObjectId[] } | undefined;
+
+      if (subStatus) {
+        const { connectMongo: cm } = await import("../../shared/db/mongo.client.js");
+        const dbSub = await cm();
+
+        type SubAgg = { _id: string; latestStatus: string; latestEndDate: Date | null };
+        const latestSubs = await dbSub
+          .collection("user_subscriptions")
+          .aggregate<SubAgg>([
+            { $sort: { createdAt: -1 } },
+            {
+              $group: {
+                _id:           "$userId",
+                latestStatus:  { $first: "$status" },
+                latestEndDate: { $first: "$endDate" },
+              },
+            },
+          ])
+          .toArray();
+
+        const activeIds: ObjectId[] = [];
+        const anySubIds: ObjectId[] = [];
+
+        for (const s of latestSubs) {
+          try {
+            const oid = new ObjectId(s._id);
+            anySubIds.push(oid);
+            const isActive =
+              s.latestStatus === "active" &&
+              s.latestEndDate instanceof Date &&
+              s.latestEndDate > now;
+            if (isActive) activeIds.push(oid);
+          } catch { /* skip invalid */ }
+        }
+
+        if (subStatus === "active") {
+          idFilter = { $in: activeIds };
+        } else if (subStatus === "expired") {
+          const expiredIds = anySubIds.filter(
+            (id) => !activeIds.some((a) => a.equals(id)),
+          );
+          idFilter = { $in: expiredIds };
+        } else if (subStatus === "none") {
+          idFilter = { $nin: anySubIds };
+        }
+      }
+
+      // ── Fetch page of users + billing rates in parallel ───────────────────
+      const [{ users, total }, rates] = await Promise.all([
+        userRepo.findPaged({ page, limit, search, role, status, idFilter }),
+        getActiveRates(now),
       ]);
 
-      // Fetch free-call usage for all user IDs in one query.
+      if (users.length === 0) {
+        return reply.send({
+          users:      [],
+          total,
+          page,
+          limit,
+          totalPages: Math.max(1, Math.ceil(total / limit)),
+        });
+      }
+
+      // ── Batch billing data — only for the users on this page ─────────────
       const userIds = users.map((u) => u._id.toString());
+
       const { connectMongo } = await import("../../shared/db/mongo.client.js");
       const db = await connectMongo();
-      const freeCallDocs = await db
-        .collection<{ userId: string; used: boolean }>("user_free_call_usage")
-        .find({ userId: { $in: userIds } })
-        .toArray();
+
+      const [durationMap, subMap, freeCallDocs] = await Promise.all([
+        callRepo.findDurationGroupedByCallerForUsers(userIds),
+        userSubRepo.findLatestForUsers(userIds),
+        db
+          .collection<{ userId: string; used: boolean }>("user_free_call_usage")
+          .find({ userId: { $in: userIds } })
+          .toArray(),
+      ]);
+
       const freeCallMap = new Map<string, boolean>(
         freeCallDocs.map((d) => [d.userId, d.used]),
       );
@@ -74,22 +162,18 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         const sub      = subMap.get(uid) ?? null;
         const freeUsed = freeCallMap.get(uid) ?? false;
 
-        // Actual minutes (raw, not capped to billable seconds)
         const audioMinutes = dur.audioSeconds / 60;
         const videoMinutes = dur.videoSeconds / 60;
 
-        // ₹ spent at current rates
         const amountUsed =
           Math.round((audioMinutes * audioRate + videoMinutes * videoRate) * 100) / 100;
 
-        // Remaining balance only makes sense when the user has paid for a subscription
         const subscriptionAmount = sub?.amount ?? null;
         const remainingBalance =
           subscriptionAmount !== null
             ? Math.max(0, Math.round((subscriptionAmount - amountUsed) * 100) / 100)
             : null;
 
-        // Remaining call time given the balance and current rates
         const remainingAudioMinutes =
           remainingBalance !== null && audioRate > 0
             ? Math.max(0, Math.floor(remainingBalance / audioRate))
@@ -125,22 +209,28 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
               }
             : null,
           usage: {
-            audioSeconds:     dur.audioSeconds,
-            videoSeconds:     dur.videoSeconds,
-            audioMinutes:     Math.round(audioMinutes * 100) / 100,
-            videoMinutes:     Math.round(videoMinutes * 100) / 100,
-            audioRate,        // ₹/min
-            videoRate,        // ₹/min
-            amountUsed,       // ₹ spent at current rates
-            remainingBalance, // ₹ left (null if no subscription)
-            remainingAudioMinutes,  // minutes of audio left (null if no sub)
-            remainingVideoMinutes,  // minutes of video left (null if no sub)
+            audioSeconds:          dur.audioSeconds,
+            videoSeconds:          dur.videoSeconds,
+            audioMinutes:          Math.round(audioMinutes * 100) / 100,
+            videoMinutes:          Math.round(videoMinutes * 100) / 100,
+            audioRate,
+            videoRate,
+            amountUsed,
+            remainingBalance,
+            remainingAudioMinutes,
+            remainingVideoMinutes,
           },
           freeCallUsed: freeUsed,
         };
       });
 
-      return reply.send({ users: enriched, total: enriched.length });
+      return reply.send({
+        users: enriched,
+        total,
+        page,
+        limit,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      });
     },
   );
 
@@ -238,6 +328,7 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       const { userId } = request.params as { userId: string };
       const q = request.query as {
         page?: string; limit?: string; callType?: string; status?: string;
+        startDate?: string; endDate?: string;
       };
 
       const page  = Math.max(1, parseInt(q.page  ?? "1",  10) || 1);
@@ -256,6 +347,12 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       };
       if (q.callType) callFilter.callType = q.callType;
       if (q.status)   callFilter.status   = q.status;
+      if (q.startDate || q.endDate) {
+        const range: Record<string, Date> = {};
+        if (q.startDate) range.$gte = new Date(q.startDate);
+        if (q.endDate)   range.$lte = new Date(q.endDate);
+        callFilter.startedAt = range;
+      }
 
       const callsCol = db.collection("calls");
 
@@ -319,6 +416,7 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     { preHandler: [authenticate, requireRole("admin")] },
     async (request, reply) => {
       const { userId } = request.params as { userId: string };
+      const q = request.query as { startDate?: string; endDate?: string };
 
       const user = await userRepo.getUserById(userId);
       if (!user) return reply.status(404).send({ message: "User not found" });
@@ -326,11 +424,21 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       const { connectMongo } = await import("../../shared/db/mongo.client.js");
       const db = await connectMongo();
 
+      const exportFilter: Record<string, unknown> = {
+        $or: [{ callerId: userId }, { receiverIds: userId }],
+      };
+      if (q.startDate || q.endDate) {
+        const range: Record<string, Date> = {};
+        if (q.startDate) range.$gte = new Date(q.startDate);
+        if (q.endDate)   range.$lte = new Date(q.endDate);
+        exportFilter.startedAt = range;
+      }
+
       const [subscriptions, rawCalls] = await Promise.all([
         userSubRepo.findAllByUserId(userId),
         db
           .collection("calls")
-          .find({ $or: [{ callerId: userId }, { receiverIds: userId }] })
+          .find(exportFilter)
           .sort({ createdAt: -1 })
           .limit(5000)
           .toArray(),
@@ -367,6 +475,54 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         })),
         calls,
         totalCalls: calls.length,
+      });
+    },
+  );
+
+  // ── Admin audit log ──────────────────────────────────────────
+  //
+  // GET /admin/audit-log?page=1&limit=20&action=&adminId=
+  // Returns paginated admin action audit entries, newest first.
+
+  app.get(
+    "/audit-log",
+    { preHandler: [authenticate, requireRole("admin")] },
+    async (request, reply) => {
+      const q = request.query as {
+        page?:    string;
+        limit?:   string;
+        action?:  string;
+        adminId?: string;
+      };
+
+      const page  = Math.max(1, parseInt(q.page  ?? "1",  10) || 1);
+      const limit = Math.min(100, Math.max(1, parseInt(q.limit ?? "20", 10) || 20));
+
+      const { entries, total } = await queryAdminAuditLog({
+        page,
+        limit,
+        action:  q.action  || undefined,
+        adminId: q.adminId || undefined,
+      });
+
+      return reply.send({
+        entries: entries.map((e) => ({
+          id:          e._id.toString(),
+          adminId:     e.adminId,
+          adminEmail:  e.adminEmail,
+          action:      e.action,
+          targetType:  e.targetType,
+          targetId:    e.targetId,
+          targetLabel: e.targetLabel,
+          before:      e.before,
+          after:       e.after,
+          ip:          e.ip,
+          timestamp:   e.timestamp.toISOString(),
+        })),
+        total,
+        page,
+        limit,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
       });
     },
   );
@@ -476,6 +632,20 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         createdBy:     request.user!.userId,
         createdAt:     new Date(),
       });
+
+      void writeAdminAuditLog({
+        adminId:     request.user!.userId,
+        adminEmail:  request.user!.email ?? "",
+        action:      "pricing_rate.created",
+        targetType:  "pricing_rate",
+        targetId:    rate._id.toString(),
+        targetLabel: `${body.callType} @ ₹${body.ratePerMinute}/min`,
+        before:      null,
+        after:       { callType: rate.callType, ratePerMinute: rate.ratePerMinute, currency: rate.currency, effectiveFrom: rate.effectiveFrom.toISOString(), label: rate.label ?? null },
+        ip:          request.ip ?? null,
+        userAgent:   (request.headers["user-agent"] as string | undefined) ?? null,
+      });
+
       return reply.status(201).send(fmtRate(rate));
     },
   );
@@ -498,8 +668,28 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       if (body.ratePerMinute !== undefined) updates.ratePerMinute = body.ratePerMinute;
       if (body.effectiveFrom !== undefined) updates.effectiveFrom = body.effectiveFrom;
       if (body.label         !== undefined) updates.label         = body.label;
+
+      // Read before-state for audit log
+      const existingRate = await pricingRepo.findById(id);
+
       const updated = await pricingRepo.update(id, updates);
       if (!updated) return reply.status(404).send({ message: "Rate not found" });
+
+      void writeAdminAuditLog({
+        adminId:     request.user!.userId,
+        adminEmail:  request.user!.email ?? "",
+        action:      "pricing_rate.updated",
+        targetType:  "pricing_rate",
+        targetId:    id,
+        targetLabel: existingRate ? `${existingRate.callType} rate` : id,
+        before: existingRate
+          ? { ratePerMinute: existingRate.ratePerMinute, effectiveFrom: existingRate.effectiveFrom.toISOString(), label: existingRate.label ?? null }
+          : null,
+        after:  { ratePerMinute: updated.ratePerMinute, effectiveFrom: updated.effectiveFrom.toISOString(), label: updated.label ?? null },
+        ip:        request.ip ?? null,
+        userAgent: (request.headers["user-agent"] as string | undefined) ?? null,
+      });
+
       return reply.send(fmtRate(updated));
     },
   );
@@ -510,8 +700,28 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     { preHandler: [authenticate, requireRole("admin")] },
     async (request, reply) => {
       const { id } = request.params as { id: string };
+
+      // Read before-state for audit log
+      const existingRate = await pricingRepo.findById(id);
+
       const deleted = await pricingRepo.delete(id);
       if (!deleted) return reply.status(404).send({ message: "Rate not found" });
+
+      void writeAdminAuditLog({
+        adminId:     request.user!.userId,
+        adminEmail:  request.user!.email ?? "",
+        action:      "pricing_rate.deleted",
+        targetType:  "pricing_rate",
+        targetId:    id,
+        targetLabel: existingRate ? `${existingRate.callType} @ ₹${existingRate.ratePerMinute}/min` : id,
+        before: existingRate
+          ? { callType: existingRate.callType, ratePerMinute: existingRate.ratePerMinute, currency: existingRate.currency, effectiveFrom: existingRate.effectiveFrom.toISOString(), label: existingRate.label ?? null }
+          : null,
+        after:     null,
+        ip:        request.ip ?? null,
+        userAgent: (request.headers["user-agent"] as string | undefined) ?? null,
+      });
+
       return reply.send({ message: "Rate deleted" });
     },
   );
@@ -578,7 +788,27 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
           return reply.status(400).send({ message: "Validation failed", errors: err.issues });
         throw err;
       }
+
+      // Read before-state for audit log
+      const existingSettings = await billingSettingsRepo.getSettings();
+
       const updated = await billingSettingsRepo.updateSettings(body);
+
+      void writeAdminAuditLog({
+        adminId:     request.user!.userId,
+        adminEmail:  request.user!.email ?? "",
+        action:      "billing_settings.updated",
+        targetType:  "billing_settings",
+        targetId:    null,
+        targetLabel: "Global billing settings",
+        before: existingSettings
+          ? { freeMinutes: existingSettings.freeMinutes, gracePeriodSeconds: existingSettings.gracePeriodSeconds }
+          : null,
+        after:     { freeMinutes: updated.freeMinutes, gracePeriodSeconds: updated.gracePeriodSeconds },
+        ip:        request.ip ?? null,
+        userAgent: (request.headers["user-agent"] as string | undefined) ?? null,
+      });
+
       return reply.send(updated);
     },
   );
@@ -629,6 +859,20 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         createdAt:      now,
         updatedAt:      now,
       });
+
+      void writeAdminAuditLog({
+        adminId:     request.user!.userId,
+        adminEmail:  request.user!.email ?? "",
+        action:      "subscription_plan.created",
+        targetType:  "subscription_plan",
+        targetId:    plan._id.toString(),
+        targetLabel: plan.name,
+        before:      null,
+        after:       { name: plan.name, durationMonths: plan.durationMonths, price: plan.price, isActive: plan.isActive },
+        ip:          request.ip ?? null,
+        userAgent:   (request.headers["user-agent"] as string | undefined) ?? null,
+      });
+
       return reply.status(201).send(fmtPlan(plan));
     },
   );
@@ -651,8 +895,28 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       if (body.name     !== undefined) updates.name     = body.name;
       if (body.price    !== undefined) updates.price    = body.price;
       if (body.isActive !== undefined) updates.isActive = body.isActive;
+
+      // Read before-state for audit log
+      const existingPlan = await subPlanRepo.findById(id);
+
       const updated = await subPlanRepo.update(id, updates);
       if (!updated) return reply.status(404).send({ message: "Plan not found" });
+
+      void writeAdminAuditLog({
+        adminId:     request.user!.userId,
+        adminEmail:  request.user!.email ?? "",
+        action:      "subscription_plan.updated",
+        targetType:  "subscription_plan",
+        targetId:    id,
+        targetLabel: existingPlan?.name ?? id,
+        before: existingPlan
+          ? { name: existingPlan.name, price: existingPlan.price, isActive: existingPlan.isActive }
+          : null,
+        after:     { name: updated.name, price: updated.price, isActive: updated.isActive },
+        ip:        request.ip ?? null,
+        userAgent: (request.headers["user-agent"] as string | undefined) ?? null,
+      });
+
       return reply.send(fmtPlan(updated));
     },
   );
@@ -663,8 +927,28 @@ const adminRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
     { preHandler: [authenticate, requireRole("admin")] },
     async (request, reply) => {
       const { id } = request.params as { id: string };
+
+      // Read before-state for audit log
+      const existingPlan = await subPlanRepo.findById(id);
+
       const deleted = await subPlanRepo.delete(id);
       if (!deleted) return reply.status(404).send({ message: "Plan not found" });
+
+      void writeAdminAuditLog({
+        adminId:     request.user!.userId,
+        adminEmail:  request.user!.email ?? "",
+        action:      "subscription_plan.deleted",
+        targetType:  "subscription_plan",
+        targetId:    id,
+        targetLabel: existingPlan?.name ?? id,
+        before: existingPlan
+          ? { name: existingPlan.name, durationMonths: existingPlan.durationMonths, price: existingPlan.price, isActive: existingPlan.isActive }
+          : null,
+        after:     null,
+        ip:        request.ip ?? null,
+        userAgent: (request.headers["user-agent"] as string | undefined) ?? null,
+      });
+
       return reply.send({ message: "Plan deleted" });
     },
   );

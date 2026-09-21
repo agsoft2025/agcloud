@@ -310,6 +310,54 @@ export class CallRepository {
     return map;
   }
 
+  /**
+   * Same aggregation as `findDurationGroupedByCaller` but scoped to the
+   * provided caller IDs. Used by the paginated admin user-list endpoint so
+   * only the current page's users are processed — not the entire calls
+   * collection.
+   */
+  async findDurationGroupedByCallerForUsers(
+    userIds: string[],
+  ): Promise<Map<string, { audioSeconds: number; videoSeconds: number }>> {
+    if (userIds.length === 0) return new Map();
+    const collection = await this.getCollection();
+
+    const pipeline = [
+      {
+        $match: {
+          callerId:  { $in: userIds },
+          status:    "ended",
+          startedAt: { $exists: true, $ne: null },
+          endedAt:   { $exists: true, $ne: null },
+        },
+      },
+      {
+        $addFields: {
+          durationSec: {
+            $max: [0, { $divide: [{ $subtract: ["$endedAt", "$startedAt"] }, 1000] }],
+          },
+        },
+      },
+      {
+        $group: {
+          _id:          "$callerId",
+          audioSeconds: { $sum: { $cond: [{ $eq: ["$callType", "audio"] }, "$durationSec", 0] } },
+          videoSeconds: { $sum: { $cond: [{ $eq: ["$callType", "video"] }, "$durationSec", 0] } },
+        },
+      },
+    ];
+
+    const results = await collection
+      .aggregate<{ _id: string; audioSeconds: number; videoSeconds: number }>(pipeline)
+      .toArray();
+
+    const map = new Map<string, { audioSeconds: number; videoSeconds: number }>();
+    for (const r of results) {
+      map.set(r._id, { audioSeconds: r.audioSeconds, videoSeconds: r.videoSeconds });
+    }
+    return map;
+  }
+
   /** Admin view: every call currently ringing or in progress, newest first, paginated. */
   async getActiveCalls(
     page: number,

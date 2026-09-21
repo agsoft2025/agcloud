@@ -10,6 +10,7 @@ import { ObjectId } from "mongodb";
 import { connectMongo } from "../../shared/db/mongo.client.js";
 import logger from "../../shared/observability/logger.js";
 import { z } from "zod";
+import { writeAdminAuditLog } from "../../shared/admin-audit-log.js";
 
 /**
  * Build a contact object.
@@ -371,6 +372,9 @@ const userRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       if (body.status     !== undefined) updates.status      = body.status;
 
       try {
+        // Fetch existing user for before-snapshot (audit log only)
+        const existingUser = await userRepo.getUserById(id);
+
         const result = await usersCollection.findOneAndUpdate(
           { _id: objectId },
           { $set: updates },
@@ -381,6 +385,22 @@ const userRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
         );
 
         if (!result) return reply.status(404).send({ message: "User not found" });
+
+        // Fire-and-forget audit log
+        void writeAdminAuditLog({
+          adminId:     request.user!.userId,
+          adminEmail:  request.user!.email ?? "",
+          action:      "user.updated",
+          targetType:  "user",
+          targetId:    id,
+          targetLabel: existingUser?.email ?? id,
+          before: existingUser
+            ? { role: existingUser.role, status: existingUser.status, displayName: existingUser.displayName }
+            : null,
+          after: { role: result.role, status: result.status, displayName: result.displayName },
+          ip:        request.ip ?? null,
+          userAgent: (request.headers["user-agent"] as string | undefined) ?? null,
+        });
 
         return reply.send({
           id:          result._id.toString(),
@@ -416,10 +436,30 @@ const userRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
       }
 
       try {
+        // Fetch before deleting for audit snapshot
+        const existingUser = await userRepo.getUserById(id);
+
         const result = await usersCollection.deleteOne({ _id: objectId });
         if (result.deletedCount === 0) {
           return reply.status(404).send({ message: "User not found" });
         }
+
+        // Fire-and-forget audit log
+        void writeAdminAuditLog({
+          adminId:     request.user!.userId,
+          adminEmail:  request.user!.email ?? "",
+          action:      "user.deleted",
+          targetType:  "user",
+          targetId:    id,
+          targetLabel: existingUser?.email ?? id,
+          before: existingUser
+            ? { email: existingUser.email, role: existingUser.role, status: existingUser.status, displayName: existingUser.displayName }
+            : null,
+          after: null,
+          ip:        request.ip ?? null,
+          userAgent: (request.headers["user-agent"] as string | undefined) ?? null,
+        });
+
         return reply.status(200).send({ message: "User deleted successfully" });
       } catch (err) {
         logger.error({ err }, "DELETE /users/:id failed");
